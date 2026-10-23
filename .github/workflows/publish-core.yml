@@ -8,6 +8,10 @@ on:
         required: true
         default: '0.1.0'
         type: string
+      verify_only:
+        description: Verify an already published version without uploading again
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -43,6 +47,7 @@ jobs:
           ./gradlew :core:test :cli:test :cli:installDist --console=plain
           make lint build test
       - name: Publish versioned core artifact
+        if: ${{ !inputs.verify_only }}
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -54,6 +59,6 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
           URL="https://maven.pkg.github.com/cat-emacs/android-project/org/cat-emacs/android-project-core/$RELEASE_VERSION/android-project-core-$RELEASE_VERSION.jar"
-          curl --fail --silent --show-error --retry 3 \
+          curl --fail --location --proto-redir '=https' --silent --show-error --retry 3 \
             --user "$GITHUB_ACTOR:$GITHUB_TOKEN" "$URL" -o "$RUNNER_TEMP/published-core.jar"
           cmp "core/build/libs/android-project-core-$RELEASE_VERSION.jar" "$RUNNER_TEMP/published-core.jar"
