@@ -118,9 +118,7 @@ android-project CLI -> android-project-core <- compose-preview CLI
 command adapter. Preview embeds the library in its JVM, not the project CLI.
 The Emacs frontend remains in `android-project.el`.
 
-Published artifact: **`org.cat-emacs:android-project-core:0.1.1`**. The current
-source targets **0.1.2**, not yet published; use the local repository below for
-consumer development.
+Published artifact: **`org.cat-emacs:android-project-core:0.1.2`**.
 Registry: `https://maven.pkg.github.com/cat-emacs/android-project`
 
 GitHub Maven Packages requires authentication even for public packages.
