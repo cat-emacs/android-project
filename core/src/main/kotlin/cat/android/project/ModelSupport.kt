@@ -22,7 +22,7 @@ fun projectInputSignature(root: Path): String {
 }
 
 /** Project sync keeps all script resources in the core artifact, never in a consumer. */
-fun synchronizeProject(root: Path, timeout: Long = 600): JsonObject {
+fun synchronizeProject(root: Path, timeout: Long = 600, selections: List<TargetSelection> = emptyList()): JsonObject {
     val directory = Files.createTempDirectory("android-project-sync-")
     val script = directory.resolve("project.init.gradle")
     val plugin = directory.resolve("android-project-tooling.jar")
@@ -35,7 +35,7 @@ fun synchronizeProject(root: Path, timeout: Long = 600): JsonObject {
         val pluginStream = ProjectModule::class.java.getResourceAsStream("/cat/android/project/android-project-tooling.jar")
             ?: throw ProjectFailure("Missing project tooling plugin", "setup")
         pluginStream.use { Files.copy(it,plugin) }
-        return synchronizeProject(root,script,plugin,timeout)
+        return synchronizeProject(root,script,plugin,timeout,selections)
     } finally {
         Runtime.getRuntime().removeShutdownHook(cleanup)
         Files.deleteIfExists(script)

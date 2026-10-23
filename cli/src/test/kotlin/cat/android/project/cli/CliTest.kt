@@ -40,6 +40,15 @@ class CliTest {
         assertEquals("input",error["kind"].asString)
         assertTrue(error["message"].asString.contains("requires daemon"))
     }
+    @Test fun `malformed variant selection cannot start model resolution`() {
+        val file=directory.resolve("selection.json")
+        for(value in listOf("{}","[false]","[{\"buildRoot\":\"/root\",\"modulePath\":false,\"variant\":\"debug\"}]")) {
+            file.writeText(value)
+            val (status,output)=run("sync","--selection-file",file.toString(),"--json")
+            assertEquals(2,status)
+            assertEquals("input",JsonParser.parseString(output).asJsonObject["error"].asJsonObject["kind"].asString)
+        }
+    }
     @Test fun `malformed options and unsupported no daemon are rejected`() {
         for(args in listOf(arrayOf("sync","--no-daemon","--json"),arrayOf("build","--timeout","-1","--json"),arrayOf("unknown","--json"))) {
             val (status,output)=run(*args)

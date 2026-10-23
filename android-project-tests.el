@@ -21,6 +21,8 @@
                   (applicationId . "com.example") (testApplicationId . "com.example.test")
                   (debuggable . t) (sourceRoots . ["src/main/kotlin"])
                   (components . [((kind . "main") (name . "debug") (sourceRoots . ["src/main/kotlin"]))])
+                  (dependencies . ((buildRoot . ,root) (modulePath . ":app") (variant . "debug")
+                                   (status . "ready") (edges . []) (issues . [])))
                   (buildType . "debug")
                   (productFlavors . []) (preferredBuildType . t) (preferredProductFlavors . []))]))))
 
@@ -36,6 +38,63 @@
     (cl-letf (((symbol-function 'executable-find) (lambda (program) program)))
       (should (equal (android-project--gradle-model-command "/tmp/project/")
                      '("/independent/android-project" "sync" "--project" "/tmp/project/" "--json"))))))
+
+(ert-deftest android-project-dependency-parser-rejects-wrong-identity-and-types ()
+  "Dependency data cannot alias another target or accept malformed graph fields."
+  (let* ((root "/tmp/project/")
+         (json-object-type 'alist) (json-array-type 'vector) (json-key-type 'symbol)
+         (model (json-read-from-string (android-project-tests--cli-output root)))
+         (target (aref (alist-get 'targets model) 0)))
+    (setf (alist-get 'variant (alist-get 'dependencies target)) "release")
+    (should-error (android-project--parse-cli-model (json-encode model) root))
+    (setf (alist-get 'variant (alist-get 'dependencies target)) "debug")
+    (setf (alist-get 'edges (alist-get 'dependencies target)) :json-false)
+    (should-error (android-project--parse-cli-model (json-encode model) root))))
+
+(ert-deftest android-project-dependency-query-is-nonblocking ()
+  "Public dependency reads return cached state without evaluating Gradle."
+  (let ((snapshot '(:state unsupported :variant "androidMain" :edges nil :issues ("unavailable"))))
+    (cl-letf (((symbol-function 'android-project-target)
+               (lambda (&rest _) (list :dependencies snapshot)))
+              ((symbol-function 'android-refresh-project-model)
+               (lambda (&rest _) (ert-fail "Blocked dependency query"))))
+      (should (equal (android-project-dependencies ":app") snapshot)))))
+
+(ert-deftest android-project-cli-selection-file-lifecycle ()
+  "Persisted composite selections reach CLI and temporary files are cleaned."
+  (let* ((root "/tmp/project/")
+         (android-project--selection-loaded-roots (list root))
+         (android-project--selected-variants '(("/tmp/project/" . ((("/tmp/included" . ":app") . "release")))))
+         command selection-file)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq command (plist-get args :command)
+                       selection-file (cadr (member "--selection-file" command)))
+                 (should (file-readable-p selection-file))
+                 (let* ((json-object-type 'alist) (json-array-type 'vector) (json-key-type 'symbol)
+                        (selected (aref (json-read-file selection-file) 0)))
+                   (should (equal (alist-get 'buildRoot selected) "/tmp/included"))
+                   (should (equal (alist-get 'variant selected) "release")))
+                 (error "expected launch failure"))))
+      (should-error (android-project--start-cli-process root '("android-project" "sync" "--json")))
+      (should-not (file-exists-p selection-file)))))
+
+(ert-deftest android-project-selection-change-during-sync-restarts-without-losing-callback ()
+  "Changing variant selection while a model is running rejects its old graph."
+  (let* ((root (file-name-as-directory (make-temp-file "android-dependency-selection" t)))
+         (android-project-cache-directory (make-temp-file "android-dependency-cache" t))
+         (android-project--project-refresh-processes (make-hash-table :test #'equal))
+         (android-project--project-refresh-callbacks (make-hash-table :test #'equal))
+         (android-project--selected-variants nil)
+         (launches 0) done)
+    (cl-letf (((symbol-function 'android-project--gradle-model-command)
+               (lambda (_) (cl-incf launches) (android-project-tests--cli-command root t))))
+      (android-refresh-project-model root (lambda (_data err) (should-not err) (setq done t)))
+      (setq android-project--selected-variants (list (cons root '((("/tmp/build" . ":app") . "release")))))
+      (let ((deadline (+ (float-time) 5)))
+        (while (and (not done) (< (float-time) deadline)) (accept-process-output nil .05)))
+      (should done)
+      (should (= launches 2)))))
 
 (ert-deftest android-project-cli-model-rejects-malformed-fields ()
   "Invalid shared target fields must not enter the public model cache."
@@ -105,6 +164,7 @@
                 :namespace (format "com.example.%s" module)
                 :debuggable-p (equal variant "debug")
                 :components nil
+                :dependencies (list :state 'not-requested :variant variant :edges nil :issues nil)
                 :application-id (format "com.example.%s" module)
                 :test-application-id ""
                 :source-roots '("src/main/kotlin")

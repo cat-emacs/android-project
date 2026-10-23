@@ -4,6 +4,9 @@ import cat.android.project.io.jsonCodec as gson
 import cat.android.project.io.jsonObject as obj
 import cat.android.project.tooling.TargetModel
 import com.android.builder.model.v2.models.AndroidProject
+import com.android.builder.model.v2.models.ModelBuilderParameter
+import com.android.builder.model.v2.models.VariantDependencies
+import org.gradle.tooling.model.gradle.BasicGradleProject
 import com.android.builder.model.v2.models.AndroidDsl
 import com.android.builder.model.v2.models.BasicAndroidProject
 import com.android.builder.model.v2.models.Versions
@@ -24,14 +27,19 @@ data class ProjectModule(
     val modelVersions: Map<String, String>, val issues: List<String>, val fetchedModels: List<String>
 ) : Serializable
 data class ProjectStructure(val modules: List<ProjectModule>, val buildRoots: List<String>,
-    val targets: List<TargetModel.TargetData>) : Serializable
+    val targets: List<TargetModel.TargetData>, val dependencies: List<DependencySnapshot> = emptyList(),
+    val buildPaths: Map<String,String> = emptyMap(), val selectionIssues: List<String> = emptyList()) : Serializable
 
 /** Runs in the build JVM. Do not capture client objects or use Gson in this action. */
-internal class ProjectStructureAction : BuildAction<ProjectStructure>, Serializable {
+internal class ProjectStructureAction(private val selections: List<TargetSelection> = emptyList(),
+    private val resolveDependencies: Boolean = false) : BuildAction<ProjectStructure>, Serializable {
     override fun execute(controller: BuildController): ProjectStructure {
         val modules = mutableListOf<ProjectModule>()
         val roots = linkedSetOf<String>()
         val targets = mutableListOf<TargetModel.TargetData>()
+        val projects = mutableMapOf<Pair<String,String>,BasicGradleProject>()
+        val buildPaths = mutableMapOf<String,String>()
+        val dimensions = mutableMapOf<Pair<String,String>,List<String>>()
         fun visit(build: GradleBuild) {
             val root = build.buildIdentifier.rootDir.canonicalPath
             if (!roots.add(root)) return
@@ -48,6 +56,9 @@ internal class ProjectStructureAction : BuildAction<ProjectStructure>, Serializa
                 }
                 val supplement = controller.findModel(project, TargetModel::class.java)
                     ?: throw IllegalStateException("Project tooling model unavailable for $root${project.path}")
+                projects[root to project.path] = project
+                val previous = buildPaths.put(supplement.buildPath,root)
+                check(previous == null || previous == root) { "Ambiguous Gradle build path ${supplement.buildPath}" }
                 var android: AndroidProject? = null
                 var dsl: AndroidDsl? = null
                 if (basic != null) {
@@ -56,6 +67,7 @@ internal class ProjectStructureAction : BuildAction<ProjectStructure>, Serializa
                     try { dsl = controller.findModel(project, AndroidDsl::class.java) }
                     catch (error: RuntimeException) { issues.add("dsl-model: ${error.message}") }
                 }
+                if(dsl != null) dimensions[root to project.path] = dsl.flavorDimensions.toList()
                 for (target in supplement.targets) {
                     check(target.buildRoot == root && target.modulePath == project.path &&
                         target.moduleRoot == project.projectDirectory.canonicalPath) { "Tooling model returned another module" }
@@ -82,7 +94,31 @@ internal class ProjectStructureAction : BuildAction<ProjectStructure>, Serializa
             build.includedBuilds.forEach { visit(it) }
         }
         visit(controller.buildModel)
-        return ProjectStructure(modules, roots.toList(), targets)
+        val dependencies = if (!resolveDependencies) emptyList() else selectTargets(targets,selections).map { target ->
+            val project = projects.getValue(target.buildRoot to target.modulePath)
+            try {
+                val model = controller.findModel(project,VariantDependencies::class.java,ModelBuilderParameter::class.java) { parameter ->
+                    parameter.variantName = target.variant
+                    parameter.dontBuildRuntimeClasspath = false
+                    parameter.dontBuildUnitTestRuntimeClasspath = true
+                    parameter.dontBuildScreenshotTestRuntimeClasspath = true
+                    parameter.dontBuildAndroidTestRuntimeClasspath = true
+                    parameter.dontBuildTestFixtureRuntimeClasspath = true
+                    parameter.dontBuildHostTestRuntimeClasspath = emptyMap()
+                    parameter.additionalArtifactsInModel = false
+                }
+                if(model == null) DependencySnapshot(target.buildRoot,target.modulePath,target.variant,"unsupported",emptyList(),
+                    listOf("AGP V2 VariantDependencies unavailable"))
+                else dependencySnapshot(target,model,buildPaths,targets,dimensions)
+            } catch(error:RuntimeException) {
+                DependencySnapshot(target.buildRoot,target.modulePath,target.variant,"failed",emptyList(),
+                    listOf(error.message ?: error.javaClass.name))
+            }
+        }
+        val selectionIssues=selections.filter { selection -> targets.none {
+            it.buildRoot == selection.buildRoot && it.modulePath == selection.modulePath && it.variant == selection.variant
+        } }.map { "Stale dependency selection ignored: $it" }
+        return ProjectStructure(modules, roots.toList(), targets, dependencies, buildPaths, selectionIssues)
     }
 }
 
@@ -140,19 +176,19 @@ class GradleTooling(private val testInstallation: Path? = null) : AutoCloseable 
         configure(launcher, arguments, env, System.err)
         await<Void?>(timeout) { launcher.run(it) }
     }
-    fun project(root: Path, script: Path, plugin: Path, timeout: Long): ProjectStructure {
+    fun project(root: Path, script: Path, plugin: Path, timeout: Long, selections: List<TargetSelection> = emptyList()): ProjectStructure {
         val arguments = listOf("--init-script", script.toString(),
             "-Dcat.android.project.tooling.jar=${plugin.toAbsolutePath()}",
             "--no-configuration-cache", "--no-configure-on-demand", "--console=plain")
-        fun fetch(): ProjectStructure {
-            val action = connect(root).action(ProjectStructureAction())
+        fun fetch(dependencies: Boolean): ProjectStructure {
+            val action = connect(root).action(ProjectStructureAction(selections,dependencies))
             configure(action, arguments, emptyMap(), System.err)
             return await<ProjectStructure>(timeout) { action.run(it) }
         }
         // Discover included inputs before the authoritative model fetch; no tasks are executed.
-        val discovered = fetch()
+        val discovered = fetch(false)
         val buildInputs = discovered.buildRoots.associateWith { projectInputSignature(Path.of(it)) }
-        val structure = fetch()
+        val structure = fetch(true)
         if (discovered.buildRoots.toSet() != structure.buildRoots.toSet() ||
             buildInputs.any { (build, before) -> before != projectInputSignature(Path.of(build)) })
             throw ProjectFailure("Included build inputs changed during project sync; retry", "stale-model")
@@ -169,12 +205,12 @@ class GradleTooling(private val testInstallation: Path? = null) : AutoCloseable 
     }
 }
 
-internal fun synchronizeProject(project: Path, script: Path, plugin: Path, timeout: Long): com.google.gson.JsonObject {
+internal fun synchronizeProject(project: Path, script: Path, plugin: Path, timeout: Long, selections: List<TargetSelection> = emptyList()): com.google.gson.JsonObject {
     val root = project.toAbsolutePath().normalize()
     if (!Files.isRegularFile(root.resolve("gradle/wrapper/gradle-wrapper.properties")))
         throw ProjectFailure("Project has no Gradle wrapper distribution", "input")
     val before = projectInputSignature(root)
-    val structure = GradleTooling().use { it.project(root, script, plugin, timeout) }
+    val structure = GradleTooling().use { it.project(root, script, plugin, timeout, selections) }
     val targets = structure.targets.distinctBy { listOf(it.buildRoot, it.modulePath, it.variant) }
     val moduleIds = structure.modules.map { it.buildRoot to it.path }.toSet()
     if (targets.any { it.buildRoot to it.modulePath !in moduleIds })
@@ -185,15 +221,19 @@ internal fun synchronizeProject(project: Path, script: Path, plugin: Path, timeo
         gson.toJsonTree(target).asJsonObject.also {
             it.addProperty("moduleName", target.modulePath.removePrefix(":"))
             it.add("modelBuildRoots", gson.toJsonTree(structure.buildRoots))
+            val dependency = structure.dependencies.find { d -> d.buildRoot == target.buildRoot && d.modulePath == target.modulePath && d.variant == target.variant }
+            it.add("dependencies", gson.toJsonTree(dependency ?: DependencySnapshot(target.buildRoot,target.modulePath,target.variant,
+                "not-requested",emptyList(),emptyList())))
         }
     }
     val after = projectInputSignature(root)
     if (before != after) throw ProjectFailure("Project inputs changed during model sync; retry", "stale-model")
     return obj("schemaVersion" to 1, "kind" to "android-project", "status" to "ready",
         "projectRoot" to root.toString(), "transport" to "gradle-tooling-api", "modules" to structure.modules,
-        "buildRoots" to structure.buildRoots, "targets" to jsonTargets,
+        "buildRoots" to structure.buildRoots, "targets" to jsonTargets, "selectionIssues" to structure.selectionIssues,
         "capabilities" to obj("agpV2Basic" to structure.modules.any { it.projectType != null },
             "variantSupplement" to true, "typedToolingModel" to true,
             "agpV2Details" to structure.modules.any { "AndroidProject" in it.fetchedModels && "AndroidDsl" in it.fetchedModels },
-            "dependencyResolution" to false))
+            "dependencyResolution" to structure.dependencies.any { it.status == "ready" || it.status == "partial" },
+            "dependencyScope" to "selected-main-compile-runtime", "variantPropagation" to false))
 }

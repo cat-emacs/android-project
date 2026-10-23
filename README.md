@@ -95,6 +95,7 @@ android-project build --project /work/app --task :app:assembleDebug \
 | `android-target-for-source-file` | Source/component ownership |
 | `android-current-target` / `android-current-application-id` | Current or remembered target |
 | `android-project-application-ids` | Project application and test IDs |
+| `android-project-dependencies` | Cached dependency state/edges for a module variant |
 | `android-project-model-status` / `android-refresh-project-model` | Sync status and asynchronous refresh |
 
 Queries return immediately with fresh or last-known data. Stale metadata starts
@@ -104,7 +105,7 @@ changing during sync cause stale results to be discarded and retried.
 Refresh callbacks receive `(DATA ERROR)`. State/success notifications use
 `android-project-model-state-changed-hook` and
 `android-project-model-updated-hook`. Module/variant selection and model caches
-are stored under `android-project-cache-directory`. Cache schema 12 invalidates
+are stored under `android-project-cache-directory`. Cache schema 13 invalidates
 older state. Targets are plists only; the old `android-mode-cache-dir` alias,
 private tuple helpers and `previewTask` hint have been removed.
 
@@ -120,7 +121,8 @@ wire interfaces compiled into both sides. The plugin jar is bundled as a core
 resource, so no extra artifact installation is required. Preview embeds the library in its JVM, not the project CLI.
 The Emacs frontend remains in `android-project.el`.
 
-Published artifact: **`org.cat-emacs:android-project-core:0.1.3`**.
+Published artifact: **`org.cat-emacs:android-project-core:0.1.3`**. Current source
+uses **0.1.4**, not published yet; use the local repository below for development.
 Registry: `https://maven.pkg.github.com/cat-emacs/android-project`
 
 GitHub Maven Packages requires authentication even for public packages.
@@ -131,6 +133,33 @@ Releases use the manual **Publish Project Core** workflow: test, publish, then
 download and compare the jar. It supports `verify_only` for existing versions.
 Local publication uses `:core:publishCorePublicationToGitHubPackagesRepository`
 and requires a classic PAT with `write:packages`.
+
+## Project dependencies
+
+Sync requests AGP V2 `VariantDependencies` for one selected variant per module,
+limited to main compile/runtime project dependencies. It retains transitive as
+well as direct project references, resolved producer attributes/capabilities,
+test-fixtures flags and composite-safe build/module identity. Producer variant
+mapping uses resolved attributes and target metadata, never consumer name guesses.
+It does not change a dependency module's user-selected variant.
+
+Each target has `dependencies` with `status`, `variant`, `edges` and `issues`.
+States are `ready`, `partial`, `unsupported`, `failed` or `not-requested`.
+Unmapped identities/variants and unresolved dependencies remain explicit; an empty
+edge list alone never proves successful resolution. This is a module-reference
+view, not the complete external-library graph or classpath/artifact freshness.
+
+CLI defaults follow Studio-style variant preferences. Override selections with
+`sync --selection-file FILE`, a JSON array of `{buildRoot,modulePath,variant}`.
+Stale saved selections fall back to defaults and are reported in `selectionIssues`.
+Emacs passes persisted selections in a private temporary file, refreshes when
+selection changes and discards a graph if selection changed during sync. Public
+queries remain nonblocking and preserve last-known data on failure.
+
+The current KMP fixture's AGP V2 dependency model is unavailable for KMP modules;
+they report `unsupported`. Ordinary Android modules depending on KMP can expose
+project identity with an unmapped producer variant (`partial`). Test-component
+graphs and full configuration-aware variant propagation are deferred.
 
 ## Limits and development
 
@@ -145,8 +174,7 @@ truthy-Provider check; persisted user variant selections still take precedence.
 The init script only loads the bundled plugin; there is no stdout marker/Base64
 protocol or `help` task. Two model actions discover included-build inputs and
 then fetch authoritative state with input-signature checks. Sync is still not
-full Android Studio phased sync: dependency resolution and dependency-led variant
-propagation are not implemented. Sync alone disables configuration cache
+full Android Studio phased sync; dependency-led variant propagation is not implemented. Sync alone disables configuration cache
 and configure-on-demand; task execution keeps the caller's policy. Undiscovered
 external build inputs can require manual refresh.
 

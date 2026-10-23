@@ -74,7 +74,7 @@ The form is not executed when no project root directory can be found."
   :type 'string
   :group 'android-project)
 
-(defconst android-project--flavor-cache-version 12
+(defconst android-project--flavor-cache-version 13
   "Flavor cache schema version.")
 
 (defvar android-project-model-updated-hook nil
@@ -314,6 +314,7 @@ When INPUTS is non-nil, use that exact path list."
                (plist-member entry :namespace)
                (plist-member entry :debuggable-p)
                (plist-member entry :components)
+               (plist-member entry :dependencies)
                (plist-member entry :source-roots)
                (plist-member entry :build-type)
                (plist-member entry :product-flavors)
@@ -491,6 +492,51 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
   "Return non-nil when VALUE is a JSON array of strings."
   (and (vectorp value) (seq-every-p #'stringp value)))
 
+(defun android-project--parse-dependencies (value build-root module-path variant)
+  "Validate dependency VALUE for BUILD-ROOT, MODULE-PATH and VARIANT."
+  (unless (and (equal (alist-get 'buildRoot value) build-root)
+               (equal (alist-get 'modulePath value) module-path)
+               (equal (alist-get 'variant value) variant)
+               (member (alist-get 'status value) '("ready" "partial" "unsupported" "failed" "not-requested"))
+               (vectorp (alist-get 'edges value))
+               (android-project--json-string-list-p (alist-get 'issues value)))
+    (error "Invalid dependency snapshot"))
+  (let ((edges
+         (mapcar
+          (lambda (edge)
+            (dolist (key '(modulePath buildPath status))
+              (unless (stringp (alist-get key edge)) (error "Invalid dependency %s" key)))
+            (dolist (key '(buildRoot variant buildType))
+              (unless (or (stringp (alist-get key edge)) (eq (alist-get key edge) :json-null))
+                (error "Invalid optional dependency %s" key)))
+            (unless (and (member (alist-get 'status edge)
+                                 '("resolved" "unknown-build" "non-android-or-unmodeled" "unmapped-variant"))
+                         (member (alist-get 'scope edge) '("compile" "runtime"))
+                         (memq (alist-get 'direct edge) '(t :json-false))
+                         (memq (alist-get 'testFixtures edge) '(t :json-false))
+                         (android-project--json-string-list-p (alist-get 'capabilities edge)))
+              (error "Invalid dependency scope/flags"))
+            (dolist (key '(productFlavors attributes))
+              (unless (and (assq key edge) (listp (alist-get key edge))
+                           (seq-every-p (lambda (pair) (and (symbolp (car pair)) (stringp (cdr pair))))
+                                        (alist-get key edge)))
+                (error "Invalid dependency attributes")))
+            (when (equal (alist-get 'status edge) "resolved")
+              (unless (and (stringp (alist-get 'buildRoot edge)) (stringp (alist-get 'variant edge)))
+                (error "Resolved dependency has no exact target")))
+            (list :build-root (unless (eq (alist-get 'buildRoot edge) :json-null) (alist-get 'buildRoot edge))
+                  :module-path (alist-get 'modulePath edge)
+                  :variant (unless (eq (alist-get 'variant edge) :json-null) (alist-get 'variant edge))
+                  :build-path (alist-get 'buildPath edge) :status (intern (alist-get 'status edge))
+                  :scope (intern (alist-get 'scope edge)) :direct-p (eq (alist-get 'direct edge) t)
+                  :test-fixtures-p (eq (alist-get 'testFixtures edge) t)
+                  :build-type (unless (eq (alist-get 'buildType edge) :json-null) (alist-get 'buildType edge))
+                  :attributes (alist-get 'attributes edge) :product-flavors (alist-get 'productFlavors edge)
+                  :capabilities (append (alist-get 'capabilities edge) nil)))
+          (append (alist-get 'edges value) nil))))
+    (list :state (intern (alist-get 'status value)) :variant variant :edges edges
+          :issues (append (alist-get 'issues value) nil))))
+
 (defun android-project--parse-cli-model (output root)
   "Validate project CLI OUTPUT for ROOT and adapt targets to public plists."
   (let* ((json-object-type 'alist) (json-array-type 'vector) (json-key-type 'symbol)
@@ -532,6 +578,8 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
                :module-name (string-remove-prefix ":" module-path)
                :module-root (alist-get 'moduleRoot entry)
                :variant (alist-get 'variant entry)
+               :dependencies (android-project--parse-dependencies
+                              (alist-get 'dependencies entry) build-root module-path (alist-get 'variant entry))
                :plugin-id (alist-get 'pluginId entry)
                :namespace (alist-get 'namespace entry)
                :project-type (alist-get 'projectType entry)
@@ -565,6 +613,10 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
       (android-project--set-project-model-state root 'failed error-data))
     (dolist (callback callbacks)
       (funcall callback data error-data))))
+
+(defun android-project--selection-signature (root)
+  "Return the variant selection identity used by a sync for ROOT."
+  (secure-hash 'sha256 (prin1-to-string (cdr (assoc root android-project--selected-variants)))))
 
 (defun android-project--project-refresh-stale-p (root start-fingerprint inputs)
   "Return non-nil if ROOT's INPUTS changed from START-FINGERPRINT."
@@ -604,6 +656,8 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
 		   (process-get process 'android-project-input-fingerprint))
 		  (inputs (process-get process 'android-project-inputs)))
               (if (or (android-project--project-refresh-stale-p root start-fingerprint inputs)
+                      (not (equal (process-get process 'android-project-selection-signature)
+                                  (android-project--selection-signature root)))
                       (equal (alist-get 'kind (android-project--cli-failure (or output ""))) "stale-model"))
 		  (progn
                     (remhash root android-project--project-refresh-invalidated)
@@ -616,8 +670,9 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
 				   (android-project--log "model response rejected: %s" (error-message-string err))
 				   nil))))
                       (cond
-                       ((android-project--project-refresh-stale-p
-			 root start-fingerprint inputs)
+                       ((or (android-project--project-refresh-stale-p root start-fingerprint inputs)
+                            (not (equal (process-get process 'android-project-selection-signature)
+                                        (android-project--selection-signature root))))
 			(remhash root android-project--project-refresh-invalidated)
 			(android-project--restart-project-refresh
 			 root (gethash root android-project--project-refresh-callbacks)))
@@ -633,6 +688,8 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
         (when-let* ((timer (process-get process 'android-project-completion-timer)))
           (cancel-timer timer)
           (process-put process 'android-project-completion-timer nil))
+        (when-let* ((file (process-get process 'android-project-selection-file)))
+          (when (file-exists-p file) (delete-file file)))
         (when (buffer-live-p diagnostics) (kill-buffer diagnostics))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
@@ -640,9 +697,25 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
 (defun android-project--start-cli-process (root command)
   "Start ROOT model COMMAND, cleaning temporary buffers on launch failure."
   (let ((buffer (generate-new-buffer " *android-project-model*"))
-        (diagnostics (generate-new-buffer " *android-project-model-log*")))
+        (diagnostics (generate-new-buffer " *android-project-model-log*"))
+        selection-file)
     (condition-case err
-        (let ((process (make-process
+        (progn
+          (when (equal (cadr command) "sync")
+            (android-project--selection-load root)
+            (setq selection-file (make-temp-file "android-project-selection-" nil ".json"))
+            (with-temp-file selection-file
+              (insert (json-encode
+                       (vconcat
+                        (delq nil
+                              (mapcar
+                               (lambda (selection)
+                                 (when (consp (car selection))
+                                   `((buildRoot . ,(caar selection)) (modulePath . ,(cdar selection))
+                                     (variant . ,(cdr selection)))))
+                               (cdr (assoc root android-project--selected-variants))))))))
+            (setq command (append command (list "--selection-file" selection-file))))
+          (let ((process (make-process
                         :name (format "android-project-model-%s"
                                       (file-name-nondirectory (directory-file-name root)))
                         :buffer buffer :stderr diagnostics :command command
@@ -652,8 +725,10 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
                                         (android-project--project-refresh-sentinel process event)
                                       (process-put process 'android-project-pending-event event))))))
           (process-put process 'android-project-diagnostics diagnostics)
-          process)
+          (process-put process 'android-project-selection-file selection-file)
+          process))
       (error
+       (when (and selection-file (file-exists-p selection-file)) (delete-file selection-file))
        (kill-buffer buffer)
        (kill-buffer diagnostics)
        (signal (car err) (cdr err))))))
@@ -681,6 +756,7 @@ requests for the same root share one Gradle process."
               (with-current-buffer buffer
 		(setq-local default-directory root))
               (process-put process 'android-project-root root)
+              (process-put process 'android-project-selection-signature (android-project--selection-signature root))
               (process-put process 'android-project-inputs inputs)
               (process-put process 'android-project-input-fingerprint fingerprint)
               (remhash root android-project--project-refresh-invalidated)
@@ -938,6 +1014,13 @@ start a refresh."
                 test-application-id)))))
      (android-project-variants project-root refresh)))))
 
+(defun android-project-dependencies (module &optional variant project-root refresh)
+  "Return last-known project dependencies for MODULE and VARIANT.
+PROJECT-ROOT and REFRESH follow `android-project-target'.  The result includes
+:state, :variant, :edges and :issues.  Only the selected variant is resolved;
+other variants explicitly report not-requested.  This query never waits."
+  (plist-get (android-project-target module variant project-root refresh) :dependencies))
+
 (defun android-project-target (module &optional variant project-root refresh)
   "Return a target for MODULE under PROJECT-ROOT.
 MODULE accepts a module ID, name, or Gradle path.  Without VARIANT, return the
@@ -1055,7 +1138,8 @@ REFRESH non-nil, refresh Gradle metadata."
     (setf (alist-get module-id selections nil nil #'equal) variant)
     (setf (alist-get root android-project--selected-variants nil nil #'string=)
           selections))
-  (android-project--selection-save root))
+  (android-project--selection-save root)
+  (android-project--mark-project-model-stale root))
 
 (defun android-project--select-target (&optional prompt)
   "Return selected (MODULE . VARIANT) for the current project.

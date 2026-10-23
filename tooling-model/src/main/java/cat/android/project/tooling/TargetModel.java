@@ -7,6 +7,7 @@ import java.util.List;
 /** Wire-only model shared by the Gradle provider and client; no Gradle/AGP references. */
 public interface TargetModel {
     List<Target> getTargets();
+    String getBuildPath();
 
     interface Component {
         String getKind();

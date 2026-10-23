@@ -3,6 +3,7 @@ package cat.android.project.cli
 import cat.android.project.GradleTooling
 import cat.android.project.ProjectFailure
 import cat.android.project.synchronizeProject
+import cat.android.project.TargetSelection
 import cat.android.project.io.atomicJson
 import cat.android.project.io.jsonCodec as gson
 import cat.android.project.io.jsonObject as envelope
@@ -21,7 +22,7 @@ private class Arguments(raw: List<String>) {
             val token=args[index++]
             if (!token.startsWith("--")) throw ProjectFailure("Unexpected argument $token","input")
             val parts=token.removePrefix("--").split('=',limit=2)
-            if (parts[0] !in setOf("project","task","gradle-arg","init-script","timeout","result-file"))
+            if (parts[0] !in setOf("project","task","gradle-arg","init-script","timeout","result-file","selection-file"))
                 throw ProjectFailure("Unknown option --${parts[0]}","input")
             val value=parts.getOrNull(1) ?: args.getOrNull(index++) ?: throw ProjectFailure("Missing $token value","input")
             values.getOrPut(parts[0]) { mutableListOf() }.add(value)
@@ -40,6 +41,7 @@ fun main(raw:Array<String>) {
 Usage: android-project <command> [--json] [options]
   doctor                                      Check backend capability (no Preview dependency)
   sync --project DIR [--timeout SECONDS]        Gradle build/module and Android target metadata
+       [--selection-file JSON]                 [{buildRoot,modulePath,variant}] dependency selections
   build --project DIR --task :app:task          Cancellable Tooling API task execution
         [--init-script FILE] [--gradle-arg=ARG] [--timeout SECONDS]
 Output: schemaVersion=1 JSON on stdout; progress/build output on stderr.
@@ -55,7 +57,23 @@ No renderer, layoutlib, editor state, or Preview CLI is required.""")
             "doctor" -> envelope("schemaVersion" to 1,"kind" to "android-project","status" to "ready",
                 "javaVersion" to System.getProperty("java.version"),"gradleToolingApi" to "9.6.1","agpModelConsumer" to "9.3.0",
                 "authRequired" to false,"capabilities" to mapOf("projectSync" to true,"taskExecution" to true,"dependencyResolution" to false))
-            "sync" -> synchronizeProject(args.root(),args.timeout())
+            "sync" -> {
+                val selections=args.get("selection-file")?.let { file ->
+                    val value=Files.newBufferedReader(Path.of(file)).use { JsonParser.parseReader(it) }
+                    if(!value.isJsonArray) throw ProjectFailure("Selection file must be an array","input")
+                    value.asJsonArray.map { item ->
+                        if(!item.isJsonObject) throw ProjectFailure("Invalid target selection","input")
+                        fun field(key:String):String {
+                            val field=item.asJsonObject[key]
+                            if(field == null || !field.isJsonPrimitive || !field.asJsonPrimitive.isString || field.asString.isBlank())
+                                throw ProjectFailure("Invalid selection $key","input")
+                            return field.asString
+                        }
+                        TargetSelection(Path.of(field("buildRoot")).toFile().canonicalPath,field("modulePath"),field("variant"))
+                    }
+                } ?: emptyList()
+                synchronizeProject(args.root(),args.timeout(),selections)
+            }
             "build" -> {
                 val root=args.root()
                 if(!Files.isRegularFile(root.resolve("gradle/wrapper/gradle-wrapper.properties"))) throw ProjectFailure("Project wrapper missing","input")

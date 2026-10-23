@@ -57,6 +57,8 @@ class ToolingTest {
         val structure=GradleTooling(home).use { it.project(root,script,plugin,120) }
         assertEquals(setOf(root.toRealPath().toString(),child.toRealPath().toString()),structure.buildRoots.toSet())
         assertEquals(2,structure.modules.size)
+        assertEquals(root.toRealPath().toString(),structure.buildPaths[":"])
+        assertEquals(child.toRealPath().toString(),structure.buildPaths[":included"])
         assertTrue(structure.targets.isEmpty())
     }
     @Test fun `compiled plugin returns typed Android supplement without delimiter loss or task execution`() {

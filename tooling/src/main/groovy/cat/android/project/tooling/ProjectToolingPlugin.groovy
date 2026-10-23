@@ -191,11 +191,13 @@ class ProjectToolingPlugin implements Plugin<Project> {
         boolean canBuild(String name) { name == TargetModel.name }
         Object buildAll(String name, Project project) {
             if (project != owner) throw new IllegalArgumentException("Wrong project for target model")
-            new Model(collect.call())
+            def root = project.rootProject as org.gradle.api.internal.project.ProjectInternal
+            new Model(collect.call(), root.identityPath.path)
         }
     }
     private static class Model implements TargetModel, Serializable {
         final List<TargetModel.Target> targets
-        Model(List<TargetModel.Target> targets) { this.targets = targets }
+        final String buildPath
+        Model(List<TargetModel.Target> targets, String buildPath) { this.targets = targets; this.buildPath = buildPath }
     }
 }
