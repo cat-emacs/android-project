@@ -647,7 +647,11 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
                         :name (format "android-project-model-%s"
                                       (file-name-nondirectory (directory-file-name root)))
                         :buffer buffer :stderr diagnostics :command command
-                        :connection-type 'pipe :noquery t :sentinel #'ignore)))
+                        :connection-type 'pipe :noquery t
+                        :sentinel (lambda (process event)
+                                    (if (process-get process 'android-project-ready)
+                                        (android-project--project-refresh-sentinel process event)
+                                      (process-put process 'android-project-pending-event event))))))
           (process-put process 'android-project-diagnostics diagnostics)
           process)
       (error
@@ -683,9 +687,10 @@ requests for the same root share one Gradle process."
               (remhash root android-project--project-refresh-invalidated)
               (puthash root process android-project--project-refresh-processes)
               (android-project--set-project-model-state root 'syncing)
-              (set-process-sentinel process #'android-project--project-refresh-sentinel)
-              ;; A fast CLI can exit while metadata is installed under `ignore'.
-              (when (memq (process-status process) '(exit signal))
+              (process-put process 'android-project-ready t)
+              ;; Keep the original sentinel: replacing it can lose an exit notice.
+              (when (or (process-get process 'android-project-pending-event)
+                        (memq (process-status process) '(exit signal)))
                 (run-at-time 0 nil #'android-project--project-refresh-sentinel
                              process "finished during setup\n"))
               (android-project--log "refreshing project model for %s asynchronously" root)
