@@ -22,7 +22,7 @@ private class Arguments(raw: List<String>) {
             val token=args[index++]
             if (!token.startsWith("--")) throw ProjectFailure("Unexpected argument $token","input")
             val parts=token.removePrefix("--").split('=',limit=2)
-            if (parts[0] !in setOf("project","task","gradle-arg","init-script","timeout","result-file","selection-file"))
+            if (parts[0] !in setOf("project","task","gradle-arg","init-script","timeout","result-file","selection-file","dependencies"))
                 throw ProjectFailure("Unknown option --${parts[0]}","input")
             val value=parts.getOrNull(1) ?: args.getOrNull(index++) ?: throw ProjectFailure("Missing $token value","input")
             values.getOrPut(parts[0]) { mutableListOf() }.add(value)
@@ -41,6 +41,7 @@ fun main(raw:Array<String>) {
 Usage: android-project <command> [--json] [options]
   doctor                                      Check backend capability (no Preview dependency)
   sync --project DIR [--timeout SECONDS]        Gradle build/module and Android target metadata
+       [--dependencies none|requested|selected] Default none; requested uses exact selection-file targets
        [--selection-file JSON]                 [{buildRoot,modulePath,variant}] dependency selections
   build --project DIR --task :app:task          Cancellable Tooling API task execution
         [--init-script FILE] [--gradle-arg=ARG] [--timeout SECONDS]
@@ -72,7 +73,7 @@ No renderer, layoutlib, editor state, or Preview CLI is required.""")
                         TargetSelection(Path.of(field("buildRoot")).toFile().canonicalPath,field("modulePath"),field("variant"))
                     }
                 } ?: emptyList()
-                synchronizeProject(args.root(),args.timeout(),selections)
+                synchronizeProject(args.root(),args.timeout(),selections,args.get("dependencies") ?: "none")
             }
             "build" -> {
                 val root=args.root()

@@ -30,9 +30,22 @@ data class ProjectStructure(val modules: List<ProjectModule>, val buildRoots: Li
     val targets: List<TargetModel.TargetData>, val dependencies: List<DependencySnapshot> = emptyList(),
     val buildPaths: Map<String,String> = emptyMap(), val selectionIssues: List<String> = emptyList()) : Serializable
 
+/** Discovery must not fetch Android or supplement models that the next action will read. */
+internal class BuildRootsAction : BuildAction<List<String>>, Serializable {
+    override fun execute(controller: BuildController): List<String> {
+        val roots = linkedSetOf<String>()
+        fun visit(build: GradleBuild) {
+            if (!roots.add(build.buildIdentifier.rootDir.canonicalPath)) return
+            build.includedBuilds.forEach { visit(it) }
+        }
+        visit(controller.buildModel)
+        return roots.toList()
+    }
+}
+
 /** Runs in the build JVM. Do not capture client objects or use Gson in this action. */
 internal class ProjectStructureAction(private val selections: List<TargetSelection> = emptyList(),
-    private val resolveDependencies: Boolean = false) : BuildAction<ProjectStructure>, Serializable {
+    private val dependencyMode: String = "none") : BuildAction<ProjectStructure>, Serializable {
     override fun execute(controller: BuildController): ProjectStructure {
         val modules = mutableListOf<ProjectModule>()
         val roots = linkedSetOf<String>()
@@ -94,7 +107,8 @@ internal class ProjectStructureAction(private val selections: List<TargetSelecti
             build.includedBuilds.forEach { visit(it) }
         }
         visit(controller.buildModel)
-        val dependencies = if (!resolveDependencies) emptyList() else selectTargets(targets,selections).map { target ->
+        val dependencyTargets = requestedDependencyTargets(targets,selections,dependencyMode)
+        val dependencies = dependencyTargets.map { target ->
             val project = projects.getValue(target.buildRoot to target.modulePath)
             try {
                 val model = controller.findModel(project,VariantDependencies::class.java,ModelBuilderParameter::class.java) { parameter ->
@@ -176,22 +190,31 @@ class GradleTooling(private val testInstallation: Path? = null) : AutoCloseable 
         configure(launcher, arguments, env, System.err)
         await<Void?>(timeout) { launcher.run(it) }
     }
-    fun project(root: Path, script: Path, plugin: Path, timeout: Long, selections: List<TargetSelection> = emptyList()): ProjectStructure {
+    fun project(root: Path, script: Path, plugin: Path, timeout: Long, selections: List<TargetSelection> = emptyList(), dependencyMode: String = "none"): ProjectStructure {
         val arguments = listOf("--init-script", script.toString(),
             "-Dcat.android.project.tooling.jar=${plugin.toAbsolutePath()}",
             "--no-configuration-cache", "--no-configure-on-demand", "--console=plain")
-        fun fetch(dependencies: Boolean): ProjectStructure {
-            val action = connect(root).action(ProjectStructureAction(selections,dependencies))
-            configure(action, arguments, emptyMap(), System.err)
-            return await<ProjectStructure>(timeout) { action.run(it) }
-        }
-        // Discover included inputs before the authoritative model fetch; no tasks are executed.
-        val discovered = fetch(false)
-        val buildInputs = discovered.buildRoots.associateWith { projectInputSignature(Path.of(it)) }
-        val structure = fetch(true)
-        if (discovered.buildRoots.toSet() != structure.buildRoots.toSet() ||
+        val started = System.nanoTime()
+        // Only Gradle structure is needed to establish included-build input guards.
+        val discovery = connect(root).action(BuildRootsAction())
+        configure(discovery, listOf("--no-configuration-cache", "--no-configure-on-demand", "--console=plain"),
+            emptyMap(), System.err)
+        val roots = await<List<String>>(timeout) { discovery.run(it) }
+        val discoveredAt = System.nanoTime()
+        val buildInputs = roots.associateWith { projectInputSignature(Path.of(it)) }
+        val guardedAt = System.nanoTime()
+        val action = connect(root).action(ProjectStructureAction(selections,dependencyMode))
+        configure(action, arguments, emptyMap(), System.err)
+        val structure = await<ProjectStructure>(timeout) { action.run(it) }
+        val fetchedAt = System.nanoTime()
+        if (roots.toSet() != structure.buildRoots.toSet() ||
             buildInputs.any { (build, before) -> before != projectInputSignature(Path.of(build)) })
             throw ProjectFailure("Included build inputs changed during project sync; retry", "stale-model")
+        val checkedAt = System.nanoTime()
+        fun millis(from: Long, to: Long) = (to - from) / 1_000_000
+        System.err.println("sync-timing: discovery=${millis(started,discoveredAt)}ms " +
+            "input-baseline=${millis(discoveredAt,guardedAt)}ms models=${millis(guardedAt,fetchedAt)}ms " +
+            "input-check=${millis(fetchedAt,checkedAt)}ms dependencies=${structure.dependencies.size}")
         return structure
     }
     /** Cancel this operation, without stopping Gradle or Kotlin daemons. */
@@ -205,12 +228,12 @@ class GradleTooling(private val testInstallation: Path? = null) : AutoCloseable 
     }
 }
 
-internal fun synchronizeProject(project: Path, script: Path, plugin: Path, timeout: Long, selections: List<TargetSelection> = emptyList()): com.google.gson.JsonObject {
+internal fun synchronizeProject(project: Path, script: Path, plugin: Path, timeout: Long, selections: List<TargetSelection> = emptyList(), dependencyMode: String = "none"): com.google.gson.JsonObject {
     val root = project.toAbsolutePath().normalize()
     if (!Files.isRegularFile(root.resolve("gradle/wrapper/gradle-wrapper.properties")))
         throw ProjectFailure("Project has no Gradle wrapper distribution", "input")
     val before = projectInputSignature(root)
-    val structure = GradleTooling().use { it.project(root, script, plugin, timeout, selections) }
+    val structure = GradleTooling().use { it.project(root, script, plugin, timeout, selections, dependencyMode) }
     val targets = structure.targets.distinctBy { listOf(it.buildRoot, it.modulePath, it.variant) }
     val moduleIds = structure.modules.map { it.buildRoot to it.path }.toSet()
     if (targets.any { it.buildRoot to it.modulePath !in moduleIds })
@@ -235,5 +258,5 @@ internal fun synchronizeProject(project: Path, script: Path, plugin: Path, timeo
             "variantSupplement" to true, "typedToolingModel" to true,
             "agpV2Details" to structure.modules.any { "AndroidProject" in it.fetchedModels && "AndroidDsl" in it.fetchedModels },
             "dependencyResolution" to structure.dependencies.any { it.status == "ready" || it.status == "partial" },
-            "dependencyScope" to "selected-main-compile-runtime", "variantPropagation" to false))
+            "dependencyScope" to "main-compile-runtime", "dependencyMode" to dependencyMode, "variantPropagation" to false))
 }

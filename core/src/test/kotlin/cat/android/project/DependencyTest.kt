@@ -36,6 +36,14 @@ class DependencyTest {
             preferred.buildType,preferred.productFlavors,true,listOf("prod"),preferred.pluginId,"","",emptyList(),"library",false)
         assertEquals("prodRelease",selectTargets(listOf(a,preferredCopy),emptyList()).single().variant)
     }
+    @Test fun `metadata sync resolves no graph and requested mode has no implicit defaults`() {
+        val a=target(); val b=target(path=":lib")
+        val request=listOf(TargetSelection("/entry",":app","debug"))
+        assertTrue(requestedDependencyTargets(listOf(a,b),request,"none").isEmpty())
+        assertTrue(requestedDependencyTargets(listOf(a,b),emptyList(),"requested").isEmpty())
+        assertEquals(listOf(a),requestedDependencyTargets(listOf(a,b),request,"requested"))
+        assertEquals(2,requestedDependencyTargets(listOf(a,b),emptyList(),"selected").size)
+    }
     @Test fun `graphs keep scope directness capabilities exact build and resolved variant`() {
         val child=model<GraphItem>("getKey" to "child","getDependencies" to emptyList<GraphItem>())
         val parent=model<GraphItem>("getKey" to "parent","getDependencies" to listOf(child))

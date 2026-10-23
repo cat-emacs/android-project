@@ -74,7 +74,7 @@ The form is not executed when no project root directory can be found."
   :type 'string
   :group 'android-project)
 
-(defconst android-project--flavor-cache-version 13
+(defconst android-project--flavor-cache-version 14
   "Flavor cache schema version.")
 
 (defvar android-project-model-updated-hook nil
@@ -614,9 +614,14 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
     (dolist (callback callbacks)
       (funcall callback data error-data))))
 
+(defvar android-project--dependency-requests (make-hash-table :test #'equal)
+  "Exact dependency targets requested per project root.")
+
 (defun android-project--selection-signature (root)
   "Return the variant selection identity used by a sync for ROOT."
-  (secure-hash 'sha256 (prin1-to-string (cdr (assoc root android-project--selected-variants)))))
+  (secure-hash 'sha256 (prin1-to-string
+                       (list (cdr (assoc root android-project--selected-variants))
+                             (gethash root android-project--dependency-requests)))))
 
 (defun android-project--project-refresh-stale-p (root start-fingerprint inputs)
   "Return non-nil if ROOT's INPUTS changed from START-FINGERPRINT."
@@ -713,8 +718,9 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
                                  (when (consp (car selection))
                                    `((buildRoot . ,(caar selection)) (modulePath . ,(cdar selection))
                                      (variant . ,(cdr selection)))))
-                               (cdr (assoc root android-project--selected-variants))))))))
-            (setq command (append command (list "--selection-file" selection-file))))
+                               (gethash root android-project--dependency-requests)))))))
+            (setq command (append command (list "--selection-file" selection-file
+                                               "--dependencies" "requested"))))
           (let ((process (make-process
                         :name (format "android-project-model-%s"
                                       (file-name-nondirectory (directory-file-name root)))
@@ -1017,9 +1023,24 @@ start a refresh."
 (defun android-project-dependencies (module &optional variant project-root refresh)
   "Return last-known project dependencies for MODULE and VARIANT.
 PROJECT-ROOT and REFRESH follow `android-project-target'.  The result includes
-:state, :variant, :edges and :issues.  Only the selected variant is resolved;
-other variants explicitly report not-requested.  This query never waits."
-  (plist-get (android-project-target module variant project-root refresh) :dependencies))
+:state, :variant, :edges and :issues.  The selected or explicit VARIANT is
+resolved on demand; unrequested variants enqueue one asynchronous sync.
+This query never waits."
+  (when-let* ((root (android-project--project-root project-root))
+              (target (android-project-target module variant root refresh)))
+    (let* ((snapshot (plist-get target :dependencies))
+           (request (cons (cons (plist-get target :build-root) (plist-get target :module-path))
+                          (plist-get target :variant)))
+           (requests (gethash root android-project--dependency-requests)))
+      (when (or refresh (and (eq (plist-get snapshot :state) 'not-requested)
+                             (not (member request requests))))
+        (unless (member request requests)
+          (puthash root (cons request
+                              (seq-remove (lambda (old) (equal (car old) (car request))) requests))
+                   android-project--dependency-requests))
+        (unless (gethash root android-project--project-refresh-processes)
+          (android-refresh-project-model root)))
+      snapshot)))
 
 (defun android-project-target (module &optional variant project-root refresh)
   "Return a target for MODULE under PROJECT-ROOT.
@@ -1139,6 +1160,11 @@ REFRESH non-nil, refresh Gradle metadata."
     (setf (alist-get root android-project--selected-variants nil nil #'string=)
           selections))
   (android-project--selection-save root)
+  (when-let* ((requests (gethash root android-project--dependency-requests))
+              ((assoc module-id requests)))
+    (puthash root (cons (cons module-id variant)
+                        (seq-remove (lambda (request) (equal (car request) module-id)) requests))
+             android-project--dependency-requests))
   (android-project--mark-project-model-stale root))
 
 (defun android-project--select-target (&optional prompt)

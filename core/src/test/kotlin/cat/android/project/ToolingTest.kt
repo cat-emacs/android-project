@@ -28,6 +28,30 @@ class ToolingTest {
         assertEquals(target.sourceRoots,result.targets.single().sourceRoots)
         assertEquals(target.moduleRoot,result.targets.single().moduleRoot)
     }
+    @Test fun `root discovery never fetches Android or tooling supplement models`() {
+        val emptyProjects=emptyList<org.gradle.tooling.model.gradle.BasicGradleProject>()
+        fun build(directory:Path, included:List<org.gradle.tooling.model.gradle.GradleBuild>): org.gradle.tooling.model.gradle.GradleBuild {
+            val id=java.lang.reflect.Proxy.newProxyInstance(javaClass.classLoader,
+                arrayOf(org.gradle.tooling.model.BuildIdentifier::class.java)) { _,method,_ ->
+                when(method.name) { "getRootDir" -> directory.toFile(); else -> error("Unexpected identifier access ${method.name}") }
+            }
+            return java.lang.reflect.Proxy.newProxyInstance(javaClass.classLoader,
+                arrayOf(org.gradle.tooling.model.gradle.GradleBuild::class.java)) { _,method,_ ->
+                when(method.name) { "getBuildIdentifier" -> id; "getIncludedBuilds" -> java.lang.reflect.Proxy.newProxyInstance(javaClass.classLoader,
+                        arrayOf(org.gradle.tooling.model.DomainObjectSet::class.java)) { _,method,_ ->
+                        when(method.name) { "iterator" -> included.iterator(); else -> error("Unexpected collection access ${method.name}") }
+                    };
+                    "getProjects" -> emptyProjects; else -> error("Unexpected build access ${method.name}") }
+            } as org.gradle.tooling.model.gradle.GradleBuild
+        }
+        val child=root.resolve("included").createDirectories()
+        val graph=build(root,listOf(build(child,emptyList()),build(child,emptyList())))
+        val controller=java.lang.reflect.Proxy.newProxyInstance(javaClass.classLoader,
+            arrayOf(org.gradle.tooling.BuildController::class.java)) { _,method,_ ->
+            when(method.name) { "getBuildModel" -> graph; else -> error("Discovery fetched model: ${method.name}") }
+        } as org.gradle.tooling.BuildController
+        assertEquals(listOf(root.toRealPath().toString(),child.toRealPath().toString()),BuildRootsAction().execute(controller))
+    }
     @Test fun `project signatures are independent of Preview assets and build outputs`() {
         root.resolve("settings.gradle.kts").writeText("rootProject.name = \"model\"")
         val before=projectInputSignature(root)
@@ -82,7 +106,12 @@ class ToolingTest {
             class FakeAndroidPlugin implements Plugin<Project> {
                 void apply(Project p) {
                     def variant = new VariantData(
-                        applicationId: p.providers.provider { 'com.example|typed' },
+                        applicationId: p.providers.provider {
+                            def counter = p.file('build/supplement-configurations')
+                            counter.parentFile.mkdirs()
+                            counter.text = ((counter.exists() ? counter.text.toInteger() : 0) + 1).toString()
+                            'com.example|typed'
+                        },
                         namespace: p.providers.provider { 'com.example' },
                         sources: new Expando(java: new Expando(static: p.providers.provider {
                             [p.layout.projectDirectory.dir('src/with|pipes;and中文')]
@@ -101,9 +130,24 @@ class ToolingTest {
         val structure=GradleTooling(home).use { it.project(root,script,plugin,120) }
         val target=structure.targets.single()
         assertEquals("com.example|typed",target.applicationId)
+        assertEquals("1",root.resolve("build/supplement-configurations").readText())
         assertEquals(listOf("src/with|pipes;and中文"),target.components.single().sourceRoots)
         assertFalse(target.preferredBuildType)
         assertEquals(listOf("VariantKgpSupplement"),structure.modules.single().fetchedModels)
+    }
+    @Test fun `lightweight discovery still rejects included build inputs changed during model fetch`() {
+        root.resolve("settings.gradle").writeText("rootProject.name='entry'\nincludeBuild('included')\n")
+        val included=root.resolve("included").createDirectories()
+        included.resolve("settings.gradle").writeText("rootProject.name='included'\n")
+        val (script,plugin)=toolingFiles()
+        script.appendText("\ngradle.projectsEvaluated { if (rootProject.name == 'included') { new File(rootProject.projectDir, 'changed.properties').text = 'model-fetch' } }\n")
+        val failure=assertFailsWith<ProjectFailure> {
+            GradleTooling(Path.of(System.getProperty("project.test.gradle.home"))).use {
+                it.project(root,script,plugin,120)
+            }
+        }
+        assertEquals("stale-model",failure.kind)
+        assertTrue(included.resolve("changed.properties").exists())
     }
     @Test fun `missing injected plugin fails instead of silently returning empty Android targets`() {
         root.resolve("settings.gradle").writeText("rootProject.name='no-plugin'\n")

@@ -40,6 +40,20 @@ internal fun selectTargets(targets: List<TargetModel.TargetData>, selections: Li
     }
 }
 
+internal fun requestedDependencyTargets(targets: List<TargetModel.TargetData>, selections: List<TargetSelection>, mode: String): List<TargetModel.TargetData> =
+    when(mode) {
+        "none" -> emptyList()
+        "selected" -> selectTargets(targets,selections)
+        "requested" -> {
+            if(selections.map { it.buildRoot to it.modulePath }.distinct().size != selections.size)
+                throw ProjectFailure("Duplicate module requests", "input")
+            targets.filter { target -> selections.any {
+                it.buildRoot == target.buildRoot && it.modulePath == target.modulePath && it.variant == target.variant
+            } }
+        }
+        else -> throw ProjectFailure("Invalid dependency mode: $mode", "input")
+    }
+
 internal fun dependencySnapshot(
     source: TargetModel.TargetData, model: VariantDependencies, buildPaths: Map<String,String>,
     targets: List<TargetModel.TargetData>, dimensions: Map<Pair<String,String>,List<String>>

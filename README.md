@@ -105,7 +105,7 @@ changing during sync cause stale results to be discarded and retried.
 Refresh callbacks receive `(DATA ERROR)`. State/success notifications use
 `android-project-model-state-changed-hook` and
 `android-project-model-updated-hook`. Module/variant selection and model caches
-are stored under `android-project-cache-directory`. Cache schema 13 invalidates
+are stored under `android-project-cache-directory`. Cache schema 14 invalidates
 older state. Targets are plists only; the old `android-mode-cache-dir` alias,
 private tuple helpers and `previewTask` hint have been removed.
 
@@ -122,7 +122,7 @@ resource, so no extra artifact installation is required. Preview embeds the libr
 The Emacs frontend remains in `android-project.el`.
 
 Published artifact: **`org.cat-emacs:android-project-core:0.1.3`**. Current source
-uses **0.1.4**, not published yet; use the local repository below for development.
+uses **0.1.5**, not published yet; use the local repository below for development.
 Registry: `https://maven.pkg.github.com/cat-emacs/android-project`
 
 GitHub Maven Packages requires authentication even for public packages.
@@ -136,7 +136,10 @@ and requires a classic PAT with `write:packages`.
 
 ## Project dependencies
 
-Sync requests AGP V2 `VariantDependencies` for one selected variant per module,
+Ordinary sync only collects metadata, without AGP dependency resolution.
+`--dependencies requested --selection-file FILE` resolves exact requested targets;
+`--dependencies selected` explicitly resolves one selected variant per module.
+The default is `--dependencies none`. Resolution uses AGP V2 `VariantDependencies`,
 limited to main compile/runtime project dependencies. It retains transitive as
 well as direct project references, resolved producer attributes/capabilities,
 test-fixtures flags and composite-safe build/module identity. Producer variant
@@ -149,12 +152,15 @@ Unmapped identities/variants and unresolved dependencies remain explicit; an emp
 edge list alone never proves successful resolution. This is a module-reference
 view, not the complete external-library graph or classpath/artifact freshness.
 
-CLI defaults follow Studio-style variant preferences. Override selections with
-`sync --selection-file FILE`, a JSON array of `{buildRoot,modulePath,variant}`.
-Stale saved selections fall back to defaults and are reported in `selectionIssues`.
-Emacs passes persisted selections in a private temporary file, refreshes when
-selection changes and discards a graph if selection changed during sync. Public
-queries remain nonblocking and preserve last-known data on failure.
+Selection files are JSON arrays of `{buildRoot,modulePath,variant}`. The `selected`
+mode follows Studio-style defaults for unspecified modules; `requested` mode never
+resolves implicit defaults. Stale selections are reported in `selectionIssues`.
+`android-project-dependencies` returns immediately and queues one async request
+for a missing graph; repeated reads share the active sync. Requests are combined
+per project, updated on variant selection, and passed through a private temporary
+file. New demands/selections arriving during sync invalidate its result and retain
+callbacks for retry. Metadata-only startup does not request all module graphs.
+No persistent dependency cache bypasses input/freshness validation.
 
 The current KMP fixture's AGP V2 dependency model is unavailable for KMP modules;
 they report `unsupported`. Ordinary Android modules depending on KMP can expose
@@ -162,6 +168,14 @@ project identity with an unmapped producer variant (`partial`). Test-component
 graphs and full configuration-aware variant propagation are deferred.
 
 ## Limits and development
+
+The staging follows the local Android Studio source design (idea revision
+`001c2a2cb31`): `ModelProviderCachedData` shares models within a sync and clears
+state afterward; phased providers reuse fetched data and control dependency
+classpath requests. This CLI borrows the bounded-lifetime principle, not the
+whole IDE phased-sync implementation. Avoiding duplicate model fetches is preferred
+to reusing stale Gradle proxies across invocations.
+
 
 Sync fetches AGP V2 `BasicAndroidProject`, `AndroidProject` and `AndroidDsl` where
 available. Namespace, final artifact IDs, build type/flavors, default preferences
@@ -172,8 +186,11 @@ build-type preferences follow V2 boolean values, fixing the old collector's
 truthy-Provider check; persisted user variant selections still take precedence.
 
 The init script only loads the bundled plugin; there is no stdout marker/Base64
-protocol or `help` task. Two model actions discover included-build inputs and
-then fetch authoritative state with input-signature checks. Sync is still not
+protocol or `help` task. A lightweight action reads only Gradle build roots,
+without injecting the plugin or fetching AGP models. A second action fetches the
+authoritative typed models once, protected by input-signature and build-root
+checks. stderr `sync-timing` separates discovery, input baseline, model fetch and
+input verification costs. No AGP proxy/model cache survives across syncs. Sync is still not
 full Android Studio phased sync; dependency-led variant propagation is not implemented. Sync alone disables configuration cache
 and configure-on-demand; task execution keeps the caller's policy. Undiscovered
 external build inputs can require manual refresh.
