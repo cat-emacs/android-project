@@ -6,7 +6,7 @@ on:
       version:
         description: Core version declared in core/build.gradle.kts
         required: true
-        default: '0.1.1'
+        default: '0.1.2'
         type: string
       verify_only:
         description: Verify an already published version without uploading again

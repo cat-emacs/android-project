@@ -122,29 +122,6 @@ def serializeComponents = { proj, variant ->
     }.join(",")]
 }
 
-def capitalizeName = { String value ->
-    value ? value.substring(0, 1).toUpperCase() + value.substring(1) : value
-}
-
-def previewTaskName = { proj, variantName, pluginId ->
-    if (pluginId == 'com.android.kotlin.multiplatform.library') {
-        def kotlin = proj.extensions.findByName("kotlin")
-        def hasJvmTarget = kotlin?.targets?.any { target ->
-            def platformType = target.hasProperty("platformType") ? target.platformType?.name : null
-            platformType == "jvm"
-        } ?: false
-        return hasJvmTarget || proj.tasks.findByName("desktopTest") != null
-            ? "desktopTest"
-            : "assemble${capitalizeName(variantName)}"
-    }
-    def capitalized = capitalizeName(variantName)
-    [
-        "test${capitalized}UnitTest",
-        "assemble${capitalized}",
-        "compile${capitalized}"
-    ].find { taskName -> proj.tasks.findByName(taskName) != null } ?: "test${capitalized}UnitTest"
-}
-
 allprojects { proj ->
     androidPluginIds.each { pluginId ->
         proj.plugins.withId(pluginId) {
@@ -202,7 +179,7 @@ gradle.projectsEvaluated {
         def testApplicationId = record.testApplicationIdProvider?.getOrNull() ?: ""
         def namespace = record.namespaceProvider?.getOrNull() ?: ""
         def components = serializeComponents(proj, record.variant)
-        println "${proj.path}|${proj.projectDir.absolutePath}|${record.buildRoot}|${variantName}|${record.applicationId}|${components.roots}|${previewTaskName(proj, variantName, record.pluginId)}|${record.buildType}|${record.productFlavors}|${record.preferredBuildType}|${record.preferredProductFlavors}|${record.pluginId}|${testApplicationId}|${namespace}|${components.serialized}|${record.projectType}|${record.debuggable}"
+        println "${proj.path}|${proj.projectDir.absolutePath}|${record.buildRoot}|${variantName}|${record.applicationId}|${components.roots}|${record.buildType}|${record.productFlavors}|${record.preferredBuildType}|${record.preferredProductFlavors}|${record.pluginId}|${testApplicationId}|${namespace}|${components.serialized}|${record.projectType}|${record.debuggable}"
     }
     println "===FLAVORS_END==="
 }

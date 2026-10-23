@@ -146,9 +146,9 @@ internal fun projectTargets(output: String): List<com.google.gson.JsonObject> {
     }
     return lines.map { line ->
         val fields = line.trim().split('|')
-        if (fields.size < 17) throw ProjectFailure("Invalid Variant API supplement record", "protocol")
+        if (fields.size != 16) throw ProjectFailure("Invalid Variant API supplement record", "protocol")
         fun values(index: Int, separator: String) = fields[index].split(separator).filter { it.isNotEmpty() }
-        val components = fields[14].split(',').filter { it.isNotEmpty() }.map { record ->
+        val components = fields[13].split(',').filter { it.isNotEmpty() }.map { record ->
             val encoded = record.split(':')
             if (encoded.size != 3) throw ProjectFailure("Invalid component record", "protocol")
             fun decode(index: Int) = String(java.util.Base64.getDecoder().decode(encoded[index]), Charsets.UTF_8)
@@ -156,10 +156,10 @@ internal fun projectTargets(output: String): List<com.google.gson.JsonObject> {
         }
         obj("modulePath" to fields[0], "moduleRoot" to fields[1], "buildRoot" to fields[2],
             "moduleName" to fields[0].removePrefix(":"), "variant" to fields[3], "applicationId" to fields[4],
-            "sourceRoots" to values(5,";"), "previewTask" to fields[6], "buildType" to fields[7],
-            "productFlavors" to values(8,","), "preferredBuildType" to (fields[9] == "true"),
-            "preferredProductFlavors" to values(10,","), "pluginId" to fields[11], "testApplicationId" to fields[12],
-            "namespace" to fields[13], "components" to components, "projectType" to fields[15], "debuggable" to (fields[16] == "true"))
+            "sourceRoots" to values(5,";"), "buildType" to fields[6],
+            "productFlavors" to values(7,","), "preferredBuildType" to (fields[8] == "true"),
+            "preferredProductFlavors" to values(9,","), "pluginId" to fields[10], "testApplicationId" to fields[11],
+            "namespace" to fields[12], "components" to components, "projectType" to fields[14], "debuggable" to (fields[15] == "true"))
     }.toList()
 }
 

@@ -104,7 +104,9 @@ changing during sync cause stale results to be discarded and retried.
 Refresh callbacks receive `(DATA ERROR)`. State/success notifications use
 `android-project-model-state-changed-hook` and
 `android-project-model-updated-hook`. Module/variant selection and model caches
-are stored under `android-project-cache-directory`.
+are stored under `android-project-cache-directory`. Cache schema 11 invalidates
+older state. Targets are plists only; the old `android-mode-cache-dir` alias,
+private tuple helpers and `previewTask` hint have been removed.
 
 ## Shared core
 
@@ -116,7 +118,9 @@ android-project CLI -> android-project-core <- compose-preview CLI
 command adapter. Preview embeds the library in its JVM, not the project CLI.
 The Emacs frontend remains in `android-project.el`.
 
-Published artifact: **`org.cat-emacs:android-project-core:0.1.1`**
+Published artifact: **`org.cat-emacs:android-project-core:0.1.1`**. The current
+source targets **0.1.2**, not yet published; use the local repository below for
+consumer development.
 Registry: `https://maven.pkg.github.com/cat-emacs/android-project`
 
 GitHub Maven Packages requires authentication even for public packages.

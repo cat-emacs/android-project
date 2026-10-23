@@ -33,8 +33,6 @@
   "Android Gradle project metadata."
   :group 'tools)
 
-(defvaralias 'android-mode-cache-dir 'android-project-cache-directory)
-
 (defcustom android-project-cli-program "android-project"
   "Independent Project System CLI used for Gradle/AGP synchronization.
 Project metadata and Tooling API belong to this package, not to Preview."
@@ -76,7 +74,7 @@ The form is not executed when no project root directory can be found."
   :type 'string
   :group 'android-project)
 
-(defconst android-project--flavor-cache-version 10
+(defconst android-project--flavor-cache-version 11
   "Flavor cache schema version.")
 
 (defvar android-project-model-updated-hook nil
@@ -317,7 +315,6 @@ When INPUTS is non-nil, use that exact path list."
                (plist-member entry :debuggable-p)
                (plist-member entry :components)
                (plist-member entry :source-roots)
-               (plist-member entry :preview-task)
                (plist-member entry :build-type)
                (plist-member entry :product-flavors)
                (plist-member entry :preferred-build-type-p)
@@ -511,7 +508,7 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
      (lambda (entry)
        (dolist (key '(buildRoot modulePath moduleRoot variant pluginId namespace projectType))
          (unless (stringp (alist-get key entry)) (error "Missing target field %s" key)))
-       (dolist (key '(applicationId testApplicationId previewTask buildType))
+       (dolist (key '(applicationId testApplicationId buildType))
          (unless (stringp (alist-get key entry)) (error "Invalid target field %s" key)))
        (dolist (key '(sourceRoots productFlavors preferredProductFlavors))
          (unless (android-project--json-string-list-p (alist-get key entry))
@@ -547,7 +544,6 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
                                            :name (alist-get 'name component)
                                            :source-roots (append (alist-get 'sourceRoots component) nil)))
                                    (append (alist-get 'components entry) nil))
-               :preview-task (or (alist-get 'previewTask entry) "")
                :build-type (or (alist-get 'buildType entry) "")
                :product-flavors (append (alist-get 'productFlavors entry) nil)
                :preferred-build-type-p (eq (alist-get 'preferredBuildType entry) t)
@@ -742,40 +738,6 @@ Gradle and keeps returning an available last-known in-memory model."
 
 
 
-
-(defun android-project--flavor-field (entry index property)
-  "Return ENTRY field from plist PROPERTY or legacy tuple INDEX."
-  (if (keywordp (car-safe entry))
-      (plist-get entry property)
-    (nth index entry)))
-
-(defun android-project--flavor-modules ()
-  "Return deduplicated list of module names from flavor data."
-  (delete-dups
-   (mapcar (lambda (entry)
-             (android-project--flavor-field entry 0 :module-name))
-           (android-project--get-flavors))))
-
-(defun android-project--flavor-variants (module)
-  "Return list of variant names for MODULE."
-  (mapcar (lambda (entry)
-            (android-project--flavor-field entry 1 :variant))
-          (seq-filter (lambda (entry)
-                        (string= (android-project--flavor-field entry 0 :module-name)
-                                 module))
-                      (android-project--get-flavors))))
-
-(defun android-project--flavor-appid (module variant)
-  "Return applicationId for MODULE and VARIANT."
-  (android-project--flavor-field
-   (seq-find (lambda (entry)
-               (and (string= (android-project--flavor-field entry 0 :module-name)
-                             module)
-                    (string= (android-project--flavor-field entry 1 :variant)
-                             variant)))
-             (android-project--get-flavors))
-   2
-   :application-id))
 
 (defun android-project--file-in-directory-p (file directory)
   "Return non-nil when FILE is inside DIRECTORY."

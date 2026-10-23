@@ -14,7 +14,7 @@ class ToolingTest {
     private fun record(module: String, build: String): String {
         fun encoded(value: String) = Base64.getEncoder().encodeToString(value.toByteArray())
         val components = "${encoded("main")}:${encoded("debug")}:${encoded("src/main/kotlin") }"
-        return "$module|$build/app|$build|debug|com.example|src/main/kotlin|assembleDebug|debug||true||com.android.application|com.example.test|com.example|$components|application|true"
+        return "$module|$build/app|$build|debug|com.example|src/main/kotlin|debug||true||com.android.application|com.example.test|com.example|$components|application|true"
     }
     @Test fun `supplement merges empty and populated included build sections`() {
         val output = "noise\n===FLAVORS_START===\n===FLAVORS_END===\n" +
@@ -25,6 +25,13 @@ class ToolingTest {
         assertEquals(listOf("/root","/included"),targets.map { it.text("buildRoot") })
         assertEquals("main",targets[0].getAsJsonArray("components")[0].asJsonObject.text("kind"))
         assertEquals("com.example.test",targets[0].text("testApplicationId"))
+    }
+    @Test fun `supplement has no preview task and rejects legacy records`() {
+        val row=record(":app","/root")
+        val targets=projectTargets("===FLAVORS_START===\n$row\n===FLAVORS_END===")
+        assertFalse(targets.single().has("previewTask"))
+        val legacy=row.split('|').toMutableList().also { it.add(6,"testDebugUnitTest") }.joinToString("|")
+        assertFailsWith<ProjectFailure> { projectTargets("===FLAVORS_START===\n$legacy\n===FLAVORS_END===") }
     }
     @Test fun `project signatures are independent of Preview assets and build outputs`() {
         root.resolve("settings.gradle.kts").writeText("rootProject.name = \"model\"")

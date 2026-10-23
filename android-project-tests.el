@@ -21,7 +21,7 @@
                   (applicationId . "com.example") (testApplicationId . "com.example.test")
                   (debuggable . t) (sourceRoots . ["src/main/kotlin"])
                   (components . [((kind . "main") (name . "debug") (sourceRoots . ["src/main/kotlin"]))])
-                  (previewTask . "testDebugUnitTest") (buildType . "debug")
+                  (buildType . "debug")
                   (productFlavors . []) (preferredBuildType . t) (preferredProductFlavors . []))]))))
 
 (defun android-project-tests--cli-command (root &optional delay)
@@ -108,7 +108,6 @@
                 :application-id (format "com.example.%s" module)
                 :test-application-id ""
                 :source-roots '("src/main/kotlin")
-                :preview-task (format "assemble%s" (capitalize variant))
                 :build-type variant
                 :product-flavors nil
                 :preferred-build-type-p nil
@@ -119,19 +118,12 @@
 
 
 
-(ert-deftest android-project-flavor-helpers-use-cache ()
-  "Flavor helper functions read module, variant and applicationId from cache."
-  (cl-letf (((symbol-function 'android-root)
-             (lambda () default-directory)))
-    (let ((android-project--flavor-cache '(("app" "debug" "com.example")
-					   ("app" "release" "com.example.release")))
-          (android-project--flavor-cache-root
-           (file-name-as-directory (expand-file-name default-directory)))
-          (android-project--flavor-cache-fingerprint nil))
-      (should (equal (android-project--flavor-modules) '("app")))
-      (should (equal (android-project--flavor-variants "app") '("debug" "release")))
-      (should (equal (android-project--flavor-appid "app" "release")
-                     "com.example.release")))))
+(ert-deftest android-project-cache-requires-plists-not-legacy-tuples ()
+  "The current cache accepts structured targets without a Preview task hint."
+  (let ((target (android-project-tests--target "app" "debug")))
+    (should (android-project--flavor-cache-valid-p (list target)))
+    (should-not (plist-member target :preview-task))
+    (should-not (android-project--flavor-cache-valid-p '(("app" "debug" "com.example"))))))
 
 (ert-deftest android-project-public-target-api-mirrors-selected-variants ()
   "Public targets expose one selected variant per Android module."
@@ -282,16 +274,15 @@
              (current-buffer)))
     (should-not (android-project--flavor-cache-load root))))
 
-(ert-deftest android-project-flavor-cache-rejects-stale-preview-task-schema ()
-  "Flavor caches created before JVM preview discovery are ignored."
+(ert-deftest android-project-flavor-cache-rejects-obsolete-schema ()
+  "Flavor caches with an obsolete schema are ignored."
   (let* ((root "/tmp/project/")
          (android-project-cache-directory (make-temp-file "android-project-cache" t))
          (file (android-project--flavor-cache-file root))
          (entry (list :module-path ":composeApp"
                       :module-root "/tmp/project/composeApp"
                       :variant "androidMain"
-                      :source-roots '("src/commonMain/kotlin")
-                      :preview-task "assembleAndroidMain")))
+                      :source-roots '("src/commonMain/kotlin"))))
     (make-directory (file-name-directory file) t)
     (with-temp-file file
       (prin1 (list :version 2 :root root :time (current-time) :data (list entry))
