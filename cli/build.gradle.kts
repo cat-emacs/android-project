@@ -17,10 +17,17 @@ tasks.test {
     useJUnitPlatform()
     systemProperty("project.test.classpath", sourceSets.main.get().runtimeClasspath.asPath)
 }
+version = providers.gradleProperty("cliVersion").get()
+
 application {
     mainClass = "cat.android.project.cli.MainKt"
     applicationName = "android-project"
 }
+tasks.distTar {
+    compression = Compression.GZIP
+    archiveExtension = "tar.gz"
+}
+
 distributions {
     main {
         distributionBaseName = "android-project"
