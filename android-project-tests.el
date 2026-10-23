@@ -30,6 +30,13 @@
         (concat (when delay "sleep 0.1; ")
                 "printf '%s' " (shell-quote-argument (android-project-tests--cli-output root)))))
 
+(ert-deftest android-project-cli-does-not-depend-on-preview ()
+  "Project synchronization invokes its independent backend directly."
+  (let ((android-project-cli-program "/independent/android-project"))
+    (cl-letf (((symbol-function 'executable-find) (lambda (program) program)))
+      (should (equal (android-project--gradle-model-command "/tmp/project/")
+                     '("/independent/android-project" "sync" "--project" "/tmp/project/" "--json"))))))
+
 (ert-deftest android-project-cli-model-rejects-malformed-fields ()
   "Invalid shared target fields must not enter the public model cache."
   (let* ((root "/tmp/project/")
@@ -40,11 +47,11 @@
 
 (ert-deftest android-project-cli-missing-command-does-not-start-or-leak-refresh ()
   "Missing CLI is explicit and cannot leave an active refresh entry behind."
-  (let ((android-project-cli-program "/missing-compose-preview-cli")
+  (let ((android-project-cli-program "/missing-android-project-cli")
         (android-project--project-refresh-processes (make-hash-table :test #'equal)))
     (let (failure)
       (should-not (android-refresh-project-model "/tmp/project/" (lambda (_data error) (setq failure error))))
-      (should (string-match-p "Shared CLI missing" failure)))
+      (should (string-match-p "Project CLI missing" failure)))
     (should (= (hash-table-count android-project--project-refresh-processes) 0))
     (should (eq (plist-get (android-project-model-status "/tmp/project/") :state) 'failed))))
 

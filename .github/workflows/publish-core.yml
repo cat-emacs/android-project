@@ -1,0 +1,59 @@
+name: Publish Project Core
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Core version declared in core/build.gradle.kts
+        required: true
+        default: '0.1.0'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-project-core
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Verify requested release version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          ACTUAL=$(./gradlew :core:properties --console=plain -q | awk '/^version: / {print $2}')
+          test "$ACTUAL" = "$RELEASE_VERSION"
+      - name: Install frontend check dependency
+        run: sudo apt-get update && sudo apt-get install -y emacs-nox
+      - name: Test project backend and frontend
+        run: |
+          ./gradlew :core:test :cli:test :cli:installDist --console=plain
+          make lint build test
+      - name: Publish versioned core artifact
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./gradlew :core:publishCorePublicationToGitHubPackagesRepository --console=plain
+      - name: Verify published artifact by authenticated download
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          URL="https://maven.pkg.github.com/cat-emacs/android-project/org/cat-emacs/android-project-core/$RELEASE_VERSION/android-project-core-$RELEASE_VERSION.jar"
+          curl --fail --silent --show-error --retry 3 \
+            --user "$GITHUB_ACTOR:$GITHUB_TOKEN" "$URL" -o "$RUNNER_TEMP/published-core.jar"
+          cmp "core/build/libs/android-project-core-$RELEASE_VERSION.jar" "$RUNNER_TEMP/published-core.jar"

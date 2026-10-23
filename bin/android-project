@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+SCRIPT=$0
+while [ -L "$SCRIPT" ]; do
+  DIR=$(CDPATH= cd -- "$(dirname -- "$SCRIPT")" && pwd)
+  LINK=$(readlink "$SCRIPT")
+  case "$LINK" in /*) SCRIPT=$LINK ;; *) SCRIPT=$DIR/$LINK ;; esac
+done
+HOME_DIR=$(CDPATH= cd -- "$(dirname -- "$SCRIPT")/.." && pwd)
+PROGRAM="$HOME_DIR/cli/build/install/android-project/bin/android-project"
+if [ ! -x "$PROGRAM" ]; then
+  echo 'android-project CLI is not built. Run ./gradlew :cli:installDist or make install-local.' >&2
+  exit 2
+fi
+exec "$PROGRAM" "$@"

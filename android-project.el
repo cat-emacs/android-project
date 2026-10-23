@@ -35,9 +35,9 @@
 
 (defvaralias 'android-mode-cache-dir 'android-project-cache-directory)
 
-(defcustom android-project-cli-program "compose-preview"
-  "Shared Kotlin CLI used for Gradle/AGP model synchronization.
-This package owns Emacs selection/cache state, not a second Gradle CLI."
+(defcustom android-project-cli-program "android-project"
+  "Independent Project System CLI used for Gradle/AGP synchronization.
+Project metadata and Tooling API belong to this package, not to Preview."
   :type 'string
   :group 'android-project)
 
@@ -484,18 +484,18 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
        (not android-project--flavor-cache-stale-p)))
 
 (defun android-project--gradle-model-command (root)
-  "Return the shared CLI model synchronization command for ROOT."
+  "Return the independent project CLI synchronization command for ROOT."
   (let ((program (executable-find android-project-cli-program)))
     (unless program
-      (user-error "Shared CLI missing: install compose-preview or set android-project-cli-program"))
-    (list program "project" "sync" "--project" root "--json")))
+      (user-error "Project CLI missing: install android-project or set android-project-cli-program"))
+    (list program "sync" "--project" root "--json")))
 
 (defun android-project--json-string-list-p (value)
   "Return non-nil when VALUE is a JSON array of strings."
   (and (vectorp value) (seq-every-p #'stringp value)))
 
 (defun android-project--parse-cli-model (output root)
-  "Validate shared CLI OUTPUT for ROOT and adapt targets to the public plists."
+  "Validate project CLI OUTPUT for ROOT and adapt targets to public plists."
   (let* ((json-object-type 'alist) (json-array-type 'vector) (json-key-type 'symbol)
          (json-false :json-false) (json-null :json-null)
          (model (json-read-from-string output))

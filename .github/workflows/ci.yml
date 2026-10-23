@@ -1,6 +1,23 @@
 name: CI
 on: [push, pull_request]
 jobs:
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew :core:test :cli:test :cli:installDist :cli:distZip
+      - name: Independent CLI smoke outside checkout
+        run: |
+          CLI="$PWD/cli/build/install/android-project/bin/android-project"
+          cd /tmp
+          "$CLI" --help
+          "$CLI" doctor --json
+          ! find "$(dirname "$CLI")/../lib" -iname '*preview*' | grep .
   ci:
     uses: cat-emacs/.github/.github/workflows/emacs-package.yml@v1
     with:
