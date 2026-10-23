@@ -25,16 +25,21 @@ fun projectInputSignature(root: Path): String {
 fun synchronizeProject(root: Path, timeout: Long = 600): JsonObject {
     val directory = Files.createTempDirectory("android-project-sync-")
     val script = directory.resolve("project.init.gradle")
-    val cleanup = Thread({ Files.deleteIfExists(script); Files.deleteIfExists(directory) }, "android-project-resource-cleanup")
+    val plugin = directory.resolve("android-project-tooling.jar")
+    val cleanup = Thread({ Files.deleteIfExists(script); Files.deleteIfExists(plugin); Files.deleteIfExists(directory) }, "android-project-resource-cleanup")
     Runtime.getRuntime().addShutdownHook(cleanup)
     try {
         val stream = ProjectModule::class.java.getResourceAsStream("/cat/android/project/project.init.gradle")
             ?: throw ProjectFailure("Missing project collector resource", "setup")
         stream.use { Files.copy(it,script) }
-        return synchronizeProject(root,script,timeout)
+        val pluginStream = ProjectModule::class.java.getResourceAsStream("/cat/android/project/android-project-tooling.jar")
+            ?: throw ProjectFailure("Missing project tooling plugin", "setup")
+        pluginStream.use { Files.copy(it,plugin) }
+        return synchronizeProject(root,script,plugin,timeout)
     } finally {
         Runtime.getRuntime().removeShutdownHook(cleanup)
         Files.deleteIfExists(script)
+        Files.deleteIfExists(plugin)
         Files.deleteIfExists(directory)
     }
 }

@@ -4,7 +4,7 @@ plugins {
     `maven-publish`
 }
 group = "org.cat-emacs"
-version = "0.1.2"
+version = "0.1.3"
 base { archivesName = "android-project-core" }
 repositories {
     google()
@@ -20,7 +20,12 @@ dependencies {
     testImplementation(kotlin("test-junit5"))
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
-tasks.processResources { from(rootProject.file("gradle/project.init.gradle")) { into("cat/android/project") } }
+sourceSets.main { java.srcDir(rootProject.file("tooling-model/src/main/java")) }
+tasks.processResources {
+    dependsOn(":tooling:jar")
+    from(rootProject.file("gradle/project.init.gradle")) { into("cat/android/project") }
+    from(project(":tooling").tasks.named("jar")) { into("cat/android/project") }
+}
 tasks.test {
     useJUnitPlatform()
     systemProperty("project.test.gradle.home", gradle.gradleHomeDir!!.absolutePath)

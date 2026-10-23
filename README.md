@@ -104,7 +104,7 @@ changing during sync cause stale results to be discarded and retried.
 Refresh callbacks receive `(DATA ERROR)`. State/success notifications use
 `android-project-model-state-changed-hook` and
 `android-project-model-updated-hook`. Module/variant selection and model caches
-are stored under `android-project-cache-directory`. Cache schema 11 invalidates
+are stored under `android-project-cache-directory`. Cache schema 12 invalidates
 older state. Targets are plists only; the old `android-mode-cache-dir` alias,
 private tuple helpers and `previewTask` hint have been removed.
 
@@ -115,10 +115,14 @@ android-project CLI -> android-project-core <- compose-preview CLI
 ```
 
 `core/` owns Tooling API/AGP models and shared IO/JSON/hash helpers; `cli/` is a
-command adapter. Preview embeds the library in its JVM, not the project CLI.
+command adapter. `tooling/` is a compiled Gradle plugin; `tooling-model/` holds
+wire interfaces compiled into both sides. The plugin jar is bundled as a core
+resource, so no extra artifact installation is required. Preview embeds the library in its JVM, not the project CLI.
 The Emacs frontend remains in `android-project.el`.
 
-Published artifact: **`org.cat-emacs:android-project-core:0.1.2`**.
+Published artifact: **`org.cat-emacs:android-project-core:0.1.2`**. Current source
+uses **0.1.3** (not published yet); use the explicit local repository below for
+consumer development.
 Registry: `https://maven.pkg.github.com/cat-emacs/android-project`
 
 GitHub Maven Packages requires authentication even for public packages.
@@ -132,9 +136,19 @@ and requires a classic PAT with `write:packages`.
 
 ## Limits and development
 
-Sync combines AGP V2 basic models with a public Variant API/KGP supplement. It
-is not full Android Studio phased sync: dependency resolution and dependency-led
-variant propagation are not implemented. Sync alone disables configuration cache
+Sync fetches AGP V2 `BasicAndroidProject`, `AndroidProject` and `AndroidDsl` where
+available. Namespace, final artifact IDs, build type/flavors, default preferences
+and debuggable state prefer those models. Static component roots and KMP source
+chains remain a Variant API/KGP supplement, returned as typed Tooling API models.
+`modules[].fetchedModels` and `issues` identify model coverage/fallbacks. Default
+build-type preferences follow V2 boolean values, fixing the old collector's
+truthy-Provider check; persisted user variant selections still take precedence.
+
+The init script only loads the bundled plugin; there is no stdout marker/Base64
+protocol or `help` task. Two model actions discover included-build inputs and
+then fetch authoritative state with input-signature checks. Sync is still not
+full Android Studio phased sync: dependency resolution and dependency-led variant
+propagation are not implemented. Sync alone disables configuration cache
 and configure-on-demand; task execution keeps the caller's policy. Undiscovered
 external build inputs can require manual refresh.
 

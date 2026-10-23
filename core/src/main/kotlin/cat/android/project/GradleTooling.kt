@@ -2,12 +2,13 @@ package cat.android.project
 
 import cat.android.project.io.jsonCodec as gson
 import cat.android.project.io.jsonObject as obj
-import cat.android.project.io.jsonText as text
+import cat.android.project.tooling.TargetModel
+import com.android.builder.model.v2.models.AndroidProject
+import com.android.builder.model.v2.models.AndroidDsl
 import com.android.builder.model.v2.models.BasicAndroidProject
 import com.android.builder.model.v2.models.Versions
 import org.gradle.tooling.*
 import org.gradle.tooling.model.gradle.GradleBuild
-import java.io.ByteArrayOutputStream
 import java.io.OutputStream
 import java.io.Serializable
 import java.nio.file.Files
@@ -20,15 +21,17 @@ import java.util.concurrent.atomic.AtomicReference
 data class ProjectModule(
     val buildRoot: String, val path: String, val name: String, val directory: String,
     val agp: String?, val projectType: String?, val variants: List<String>,
-    val modelVersions: Map<String, String>, val issues: List<String>
+    val modelVersions: Map<String, String>, val issues: List<String>, val fetchedModels: List<String>
 ) : Serializable
-data class ProjectStructure(val modules: List<ProjectModule>, val buildRoots: List<String>) : Serializable
+data class ProjectStructure(val modules: List<ProjectModule>, val buildRoots: List<String>,
+    val targets: List<TargetModel.TargetData>) : Serializable
 
 /** Runs in the build JVM. Do not capture client objects or use Gson in this action. */
 internal class ProjectStructureAction : BuildAction<ProjectStructure>, Serializable {
     override fun execute(controller: BuildController): ProjectStructure {
         val modules = mutableListOf<ProjectModule>()
         val roots = linkedSetOf<String>()
+        val targets = mutableListOf<TargetModel.TargetData>()
         fun visit(build: GradleBuild) {
             val root = build.buildIdentifier.rootDir.canonicalPath
             if (!roots.add(root)) return
@@ -43,14 +46,43 @@ internal class ProjectStructureAction : BuildAction<ProjectStructure>, Serializa
                         issues.add("basic-model: ${error.message}")
                     }
                 }
+                val supplement = controller.findModel(project, TargetModel::class.java)
+                    ?: throw IllegalStateException("Project tooling model unavailable for $root${project.path}")
+                var android: AndroidProject? = null
+                var dsl: AndroidDsl? = null
+                if (basic != null) {
+                    try { android = controller.findModel(project, AndroidProject::class.java) }
+                    catch (error: RuntimeException) { issues.add("android-model: ${error.message}") }
+                    try { dsl = controller.findModel(project, AndroidDsl::class.java) }
+                    catch (error: RuntimeException) { issues.add("dsl-model: ${error.message}") }
+                }
+                for (target in supplement.targets) {
+                    check(target.buildRoot == root && target.modulePath == project.path &&
+                        target.moduleRoot == project.projectDirectory.canonicalPath) { "Tooling model returned another module" }
+                    val basicVariant = basic?.variants?.find { it.name == target.variant }
+                    val androidVariant = android?.variants?.find { it.name == target.variant }
+                    val buildType = basicVariant?.buildType ?: target.buildType
+                    val buildDsl = dsl?.buildTypes?.find { it.name == buildType }
+                    // Final IDs come from artifacts, never DSL namespace/defaultConfig guesses.
+                    val mainId = androidVariant?.mainArtifact?.applicationId ?: target.applicationId
+                    val testId = androidVariant?.deviceTestArtifacts?.get("androidTest")?.applicationId ?: target.testApplicationId
+                    targets.add(TargetModel.TargetData(target.modulePath, target.moduleRoot, target.buildRoot, target.variant,
+                        mainId, target.sourceRoots, buildType, basicVariant?.productFlavors ?: target.productFlavors,
+                        buildDsl?.isDefault ?: target.preferredBuildType,
+                        dsl?.productFlavors?.filter { it.isDefault == true }?.map { it.name } ?: target.preferredProductFlavors,
+                        target.pluginId, testId, android?.namespace ?: target.namespace, target.components.map { TargetModel.ComponentData(it.kind,it.name,it.sourceRoots) },
+                        target.projectType, buildDsl?.isDebuggable ?: target.debuggable))
+                }
                 modules.add(ProjectModule(root, project.path, project.name, project.projectDirectory.canonicalPath,
                     versions?.agp, basic?.projectType?.name, basic?.variants?.map { it.name }.orEmpty(),
-                    versions?.versions?.mapValues { (_,version) -> "${version.major}.${version.minor}" }.orEmpty(), issues))
+                    versions?.versions?.mapValues { (_,version) -> "${version.major}.${version.minor}" }.orEmpty(), issues,
+                    listOfNotNull("VariantKgpSupplement", basic?.let { "BasicAndroidProject" },
+                        android?.let { "AndroidProject" }, dsl?.let { "AndroidDsl" })))
             }
             build.includedBuilds.forEach { visit(it) }
         }
         visit(controller.buildModel)
-        return ProjectStructure(modules, roots.toList())
+        return ProjectStructure(modules, roots.toList(), targets)
     }
 }
 
@@ -108,21 +140,23 @@ class GradleTooling(private val testInstallation: Path? = null) : AutoCloseable 
         configure(launcher, arguments, env, System.err)
         await<Void?>(timeout) { launcher.run(it) }
     }
-    fun project(root: Path, script: Path, timeout: Long): Pair<ProjectStructure,String> {
-        val output = ByteArrayOutputStream()
-        val connection = connect(root)
-        val action = connection.action(ProjectStructureAction())
-        // Model sync is independent of Preview task configuration-cache policy.
-        configure(action, listOf("--no-configuration-cache", "--no-configure-on-demand", "--console=plain"), emptyMap(), System.err)
-        val structure = await<ProjectStructure>(timeout) { action.run(it) }
-        val buildInputs = structure.buildRoots.associateWith { projectInputSignature(Path.of(it)) }
-        // Task-mode evaluation preserves KMP Variant API lifecycle semantics.
-        val supplement = connection.newBuild().forTasks("help")
-        configure(supplement, listOf("--init-script", script.toString(), "--no-configuration-cache", "--no-configure-on-demand", "--console=plain"), emptyMap(), output)
-        await<Void?>(timeout) { supplement.run(it) }
-        if (buildInputs.any { (build, before) -> before != projectInputSignature(Path.of(build)) })
+    fun project(root: Path, script: Path, plugin: Path, timeout: Long): ProjectStructure {
+        val arguments = listOf("--init-script", script.toString(),
+            "-Dcat.android.project.tooling.jar=${plugin.toAbsolutePath()}",
+            "--no-configuration-cache", "--no-configure-on-demand", "--console=plain")
+        fun fetch(): ProjectStructure {
+            val action = connect(root).action(ProjectStructureAction())
+            configure(action, arguments, emptyMap(), System.err)
+            return await<ProjectStructure>(timeout) { action.run(it) }
+        }
+        // Discover included inputs before the authoritative model fetch; no tasks are executed.
+        val discovered = fetch()
+        val buildInputs = discovered.buildRoots.associateWith { projectInputSignature(Path.of(it)) }
+        val structure = fetch()
+        if (discovered.buildRoots.toSet() != structure.buildRoots.toSet() ||
+            buildInputs.any { (build, before) -> before != projectInputSignature(Path.of(build)) })
             throw ProjectFailure("Included build inputs changed during project sync; retry", "stale-model")
-        return structure to output.toString(Charsets.UTF_8)
+        return structure
     }
     /** Cancel this operation, without stopping Gradle or Kotlin daemons. */
     fun cancel() { cancellation.cancel() }
@@ -135,52 +169,31 @@ class GradleTooling(private val testInstallation: Path? = null) : AutoCloseable 
     }
 }
 
-internal fun projectTargets(output: String): List<com.google.gson.JsonObject> {
-    var inside = false
-    val lines = output.lineSequence().filter { line ->
-        when (line.trim()) {
-            "===FLAVORS_START===" -> { inside = true; false }
-            "===FLAVORS_END===" -> { inside = false; false }
-            else -> inside && line.startsWith(":")
-        }
-    }
-    return lines.map { line ->
-        val fields = line.trim().split('|')
-        if (fields.size != 16) throw ProjectFailure("Invalid Variant API supplement record", "protocol")
-        fun values(index: Int, separator: String) = fields[index].split(separator).filter { it.isNotEmpty() }
-        val components = fields[13].split(',').filter { it.isNotEmpty() }.map { record ->
-            val encoded = record.split(':')
-            if (encoded.size != 3) throw ProjectFailure("Invalid component record", "protocol")
-            fun decode(index: Int) = String(java.util.Base64.getDecoder().decode(encoded[index]), Charsets.UTF_8)
-            obj("kind" to decode(0), "name" to decode(1), "sourceRoots" to decode(2).split(';').filter { it.isNotEmpty() })
-        }
-        obj("modulePath" to fields[0], "moduleRoot" to fields[1], "buildRoot" to fields[2],
-            "moduleName" to fields[0].removePrefix(":"), "variant" to fields[3], "applicationId" to fields[4],
-            "sourceRoots" to values(5,";"), "buildType" to fields[6],
-            "productFlavors" to values(7,","), "preferredBuildType" to (fields[8] == "true"),
-            "preferredProductFlavors" to values(9,","), "pluginId" to fields[10], "testApplicationId" to fields[11],
-            "namespace" to fields[12], "components" to components, "projectType" to fields[14], "debuggable" to (fields[15] == "true"))
-    }.toList()
-}
-
-internal fun synchronizeProject(project: Path, script: Path, timeout: Long): com.google.gson.JsonObject {
+internal fun synchronizeProject(project: Path, script: Path, plugin: Path, timeout: Long): com.google.gson.JsonObject {
     val root = project.toAbsolutePath().normalize()
     if (!Files.isRegularFile(root.resolve("gradle/wrapper/gradle-wrapper.properties")))
         throw ProjectFailure("Project has no Gradle wrapper distribution", "input")
     val before = projectInputSignature(root)
-    val (structure, supplement) = GradleTooling().use { it.project(root, script, timeout) }
-    val targets = projectTargets(supplement).distinctBy { listOf(it.text("buildRoot"), it.text("modulePath"), it.text("variant")) }
+    val structure = GradleTooling().use { it.project(root, script, plugin, timeout) }
+    val targets = structure.targets.distinctBy { listOf(it.buildRoot, it.modulePath, it.variant) }
     val moduleIds = structure.modules.map { it.buildRoot to it.path }.toSet()
-    if (targets.any { it.text("buildRoot") to it.text("modulePath") !in moduleIds })
+    if (targets.any { it.buildRoot to it.modulePath !in moduleIds })
         throw ProjectFailure("Variant supplement contains an unknown build/module", "model")
     if (targets.isEmpty() && structure.modules.any { it.agp != null })
         throw ProjectFailure("Android modules exist but Variant API supplement is empty", "model")
-    targets.forEach { it.add("modelBuildRoots", gson.toJsonTree(structure.buildRoots)) }
+    val jsonTargets = targets.map { target ->
+        gson.toJsonTree(target).asJsonObject.also {
+            it.addProperty("moduleName", target.modulePath.removePrefix(":"))
+            it.add("modelBuildRoots", gson.toJsonTree(structure.buildRoots))
+        }
+    }
     val after = projectInputSignature(root)
     if (before != after) throw ProjectFailure("Project inputs changed during model sync; retry", "stale-model")
     return obj("schemaVersion" to 1, "kind" to "android-project", "status" to "ready",
         "projectRoot" to root.toString(), "transport" to "gradle-tooling-api", "modules" to structure.modules,
-        "buildRoots" to structure.buildRoots, "targets" to targets,
+        "buildRoots" to structure.buildRoots, "targets" to jsonTargets,
         "capabilities" to obj("agpV2Basic" to structure.modules.any { it.projectType != null },
-            "variantSupplement" to true, "dependencyResolution" to false))
+            "variantSupplement" to true, "typedToolingModel" to true,
+            "agpV2Details" to structure.modules.any { "AndroidProject" in it.fetchedModels && "AndroidDsl" in it.fetchedModels },
+            "dependencyResolution" to false))
 }

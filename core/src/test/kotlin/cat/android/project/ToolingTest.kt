@@ -3,7 +3,6 @@ package cat.android.project
 import cat.android.project.io.jsonText as text
 import java.nio.file.Path
 import java.nio.file.Files
-import java.util.Base64
 import kotlin.io.path.*
 import kotlin.test.*
 import org.junit.jupiter.api.Test
@@ -11,27 +10,23 @@ import org.junit.jupiter.api.io.TempDir
 
 class ToolingTest {
     @TempDir lateinit var root: Path
-    private fun record(module: String, build: String): String {
-        fun encoded(value: String) = Base64.getEncoder().encodeToString(value.toByteArray())
-        val components = "${encoded("main")}:${encoded("debug")}:${encoded("src/main/kotlin") }"
-        return "$module|$build/app|$build|debug|com.example|src/main/kotlin|debug||true||com.android.application|com.example.test|com.example|$components|application|true"
+    private fun toolingFiles(): Pair<Path,Path> {
+        val script=root.resolve("model.init.gradle")
+        val plugin=root.resolve("android-project-tooling.jar")
+        ProjectModule::class.java.getResourceAsStream("/cat/android/project/project.init.gradle")!!.use { Files.copy(it,script) }
+        ProjectModule::class.java.getResourceAsStream("/cat/android/project/android-project-tooling.jar")!!.use { Files.copy(it,plugin) }
+        return script to plugin
     }
-    @Test fun `supplement merges empty and populated included build sections`() {
-        val output = "noise\n===FLAVORS_START===\n===FLAVORS_END===\n" +
-            "===FLAVORS_START===\n${record(":app","/root")}\n===FLAVORS_END===\n" +
-            "===FLAVORS_START===\n${record(":app","/included")}\n===FLAVORS_END===\n"
-        val targets=projectTargets(output)
-        assertEquals(2,targets.size)
-        assertEquals(listOf("/root","/included"),targets.map { it.text("buildRoot") })
-        assertEquals("main",targets[0].getAsJsonArray("components")[0].asJsonObject.text("kind"))
-        assertEquals("com.example.test",targets[0].text("testApplicationId"))
-    }
-    @Test fun `supplement has no preview task and rejects legacy records`() {
-        val row=record(":app","/root")
-        val targets=projectTargets("===FLAVORS_START===\n$row\n===FLAVORS_END===")
-        assertFalse(targets.single().has("previewTask"))
-        val legacy=row.split('|').toMutableList().also { it.add(6,"testDebugUnitTest") }.joinToString("|")
-        assertFailsWith<ProjectFailure> { projectTargets("===FLAVORS_START===\n$legacy\n===FLAVORS_END===") }
+    @Test fun `typed DTOs serialize delimiters and unicode without a text protocol`() {
+        val target=cat.android.project.tooling.TargetModel.TargetData(":app", "/path|with;delimiters", "/root", "debug",
+            "com.example",listOf("src/中文|a;b"),"debug",listOf("a,b"),true,emptyList(),"com.android.application",
+            "com.example.test","com.example",listOf(cat.android.project.tooling.TargetModel.ComponentData("main","debug",listOf("src/中文|a;b"))),
+            "application",true)
+        val bytes=java.io.ByteArrayOutputStream()
+        java.io.ObjectOutputStream(bytes).use { it.writeObject(ProjectStructure(emptyList(),listOf("/root"),listOf(target))) }
+        val result=java.io.ObjectInputStream(bytes.toByteArray().inputStream()).use { it.readObject() as ProjectStructure }
+        assertEquals(target.sourceRoots,result.targets.single().sourceRoots)
+        assertEquals(target.moduleRoot,result.targets.single().moduleRoot)
     }
     @Test fun `project signatures are independent of Preview assets and build outputs`() {
         root.resolve("settings.gradle.kts").writeText("rootProject.name = \"model\"")
@@ -50,8 +45,74 @@ class ToolingTest {
         root.resolve("settings.gradle.kts").writeText("rootProject.name = \"changed\"")
         assertNotEquals(before,projectInputSignature(root))
     }
-    @Test fun `supplement rejects truncated records`() {
-        assertFailsWith<ProjectFailure> { projectTargets("===FLAVORS_START===\n:app|bad\n===FLAVORS_END===") }
+    @Test fun `typed model discovers included builds without executing help or user tasks`() {
+        val home=Path.of(System.getProperty("project.test.gradle.home"))
+        val child=root.resolve("included").createDirectories()
+        root.resolve("settings.gradle").writeText("rootProject.name='entry'\nincludeBuild('included')\n")
+        child.resolve("settings.gradle").writeText("rootProject.name='included'\n")
+        val failTasks="tasks.configureEach { doFirst { throw new GradleException('MUST_NOT_EXECUTE_TASKS') } }\n"
+        root.resolve("build.gradle").writeText(failTasks)
+        child.resolve("build.gradle").writeText(failTasks)
+        val (script,plugin)=toolingFiles()
+        val structure=GradleTooling(home).use { it.project(root,script,plugin,120) }
+        assertEquals(setOf(root.toRealPath().toString(),child.toRealPath().toString()),structure.buildRoots.toSet())
+        assertEquals(2,structure.modules.size)
+        assertTrue(structure.targets.isEmpty())
+    }
+    @Test fun `compiled plugin returns typed Android supplement without delimiter loss or task execution`() {
+        val home=Path.of(System.getProperty("project.test.gradle.home"))
+        root.resolve("settings.gradle").writeText("rootProject.name='typed-provider'\n")
+        root.resolve("buildSrc/src/main/groovy").createDirectories()
+        root.resolve("buildSrc/src/main/resources/META-INF/gradle-plugins").createDirectories()
+        root.resolve("buildSrc/build.gradle").writeText("plugins { id 'groovy' }\ndependencies { implementation gradleApi(); implementation localGroovy() }\n")
+        root.resolve("buildSrc/src/main/resources/META-INF/gradle-plugins/com.android.application.properties")
+            .writeText("implementation-class=FakeAndroidPlugin\n")
+        root.resolve("src/with|pipes;and中文").createDirectories()
+        root.resolve("buildSrc/src/main/groovy/FakeAndroidPlugin.groovy").writeText("""
+            import org.gradle.api.*
+            class VariantData {
+                String name = 'debug', buildType = 'debug'
+                List productFlavors = []
+                def applicationId, namespace, sources
+                boolean debuggable = true
+            }
+            class BuildTypeData { boolean isDefault = false }
+            class FakeAndroidPlugin implements Plugin<Project> {
+                void apply(Project p) {
+                    def variant = new VariantData(
+                        applicationId: p.providers.provider { 'com.example|typed' },
+                        namespace: p.providers.provider { 'com.example' },
+                        sources: new Expando(java: new Expando(static: p.providers.provider {
+                            [p.layout.projectDirectory.dir('src/with|pipes;and中文')]
+                        }), kotlin: null))
+                    p.extensions.add('android', new Expando(
+                        buildTypes: new Expando(findByName: { name -> new BuildTypeData() }),
+                        productFlavors: []))
+                    p.extensions.add('androidComponents', new Expando(
+                        selector: { -> new Expando(all: { -> 'all' }) },
+                        onVariants: { selector, action -> action.call(variant) }))
+                }
+            }
+        """.trimIndent())
+        root.resolve("build.gradle").writeText("apply plugin: 'com.android.application'\ntasks.configureEach { doFirst { throw new GradleException('TASK_EXECUTED') } }\n")
+        val (script,plugin)=toolingFiles()
+        val structure=GradleTooling(home).use { it.project(root,script,plugin,120) }
+        val target=structure.targets.single()
+        assertEquals("com.example|typed",target.applicationId)
+        assertEquals(listOf("src/with|pipes;and中文"),target.components.single().sourceRoots)
+        assertFalse(target.preferredBuildType)
+        assertEquals(listOf("VariantKgpSupplement"),structure.modules.single().fetchedModels)
+    }
+    @Test fun `missing injected plugin fails instead of silently returning empty Android targets`() {
+        root.resolve("settings.gradle").writeText("rootProject.name='no-plugin'\n")
+        val script=root.resolve("empty.init.gradle")
+        script.writeText("// no tooling plugin\n")
+        val failure=assertFailsWith<ProjectFailure> {
+            GradleTooling(Path.of(System.getProperty("project.test.gradle.home"))).use {
+                it.project(root,script,root.resolve("absent.jar"),120)
+            }
+        }
+        assertTrue(failure.message!!.contains("Project tooling model unavailable"))
     }
     @Test fun `tooling action fetches real Gradle build and preview task honors configuration cache`() {
         // Reuse the exact Gradle distribution running these tests; no network/Android SDK required.
@@ -62,16 +123,15 @@ class ToolingTest {
         root.resolve("build.gradle").writeText("tasks.register('probe') { doLast { println 'TOOLING_PROBE_OK' } }\n" +
             "tasks.register('broken') { doLast { throw new GradleException('EXPECTED_TOOLING_FAILURE') } }\n" +
             "tasks.register('slow') { doLast { Thread.sleep(30000) } }\n")
-        val script=root.resolve("model.init.gradle")
-        script.writeText("gradle.projectsEvaluated { println '===FLAVORS_START==='; println '===FLAVORS_END===' }\n")
-        val (structure,output)=GradleTooling(Path.of(home)).use { tooling ->
-            val result=tooling.project(root,script,120)
+        val (script,plugin)=toolingFiles()
+        val structure=GradleTooling(Path.of(home)).use { tooling ->
+            val result=tooling.project(root,script,plugin,120)
             val failure=assertFailsWith<ProjectFailure> { tooling.build(root.resolve("lib"),":probe",emptyList(),emptyMap(),120) }
             assertEquals("input",failure.kind)
             result
         }
         assertTrue(structure.modules.any { it.path == ":lib" })
-        assertTrue(output.contains("===FLAVORS_START==="))
+        assertTrue(structure.targets.isEmpty())
         GradleTooling(Path.of(home)).use { it.build(root,":probe",listOf("--configuration-cache"),emptyMap(),120) }
         assertTrue(root.resolve(".gradle/configuration-cache").exists())
         val failure=assertFailsWith<ProjectFailure> {

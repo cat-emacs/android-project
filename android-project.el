@@ -74,7 +74,7 @@ The form is not executed when no project root directory can be found."
   :type 'string
   :group 'android-project)
 
-(defconst android-project--flavor-cache-version 11
+(defconst android-project--flavor-cache-version 12
   "Flavor cache schema version.")
 
 (defvar android-project-model-updated-hook nil
