@@ -3,12 +3,13 @@ package cat.android.project.cli
 import cat.android.project.GradleTooling
 import cat.android.project.ProjectFailure
 import cat.android.project.synchronizeProject
+import cat.android.project.io.atomicJson
+import cat.android.project.io.jsonCodec as gson
+import cat.android.project.io.jsonObject as envelope
 import com.google.gson.*
 import java.nio.file.*
 import kotlin.system.exitProcess
 
-private val gson = GsonBuilder().serializeNulls().disableHtmlEscaping().create()
-private fun envelope(vararg pairs: Pair<String,Any?>) = gson.toJsonTree(mapOf(*pairs)).asJsonObject
 private class Arguments(raw: List<String>) {
     val json = "--json" in raw
     val command = raw.firstOrNull { it != "--json" } ?: "help"
@@ -32,15 +33,6 @@ private class Arguments(raw: List<String>) {
     fun timeout()=(get("timeout")?.toLongOrNull() ?: if(get("timeout")==null) 600 else throw ProjectFailure("Invalid timeout","input")).also {
         if(it<=0) throw ProjectFailure("Timeout must be positive","input")
     }
-}
-private fun write(path:Path,result:JsonObject) {
-    Files.createDirectories(path.parent)
-    val temporary=Files.createTempFile(path.parent,".android-project-",".json")
-    try {
-        Files.newBufferedWriter(temporary).use { gson.toJson(result,it) }
-        try { Files.move(temporary,path,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING) }
-        catch (_:AtomicMoveNotSupportedException) { Files.move(temporary,path,StandardCopyOption.REPLACE_EXISTING) }
-    } finally { Files.deleteIfExists(temporary) }
 }
 fun main(raw:Array<String>) {
     if(raw.isEmpty() || raw.any { it=="--help" || it=="-h" }) {
@@ -81,7 +73,7 @@ No renderer, layoutlib, editor state, or Preview CLI is required.""")
         envelope("schemaVersion" to 1,"status" to "failed","error" to mapOf("kind" to ((error as? ProjectFailure)?.kind ?: "error"),"message" to error.message))
     }
     val emitted=try {
-        args?.get("result-file")?.let { write(Path.of(it).toAbsolutePath().normalize(),result) }; result
+        args?.get("result-file")?.let { atomicJson(Path.of(it).toAbsolutePath().normalize(),result) }; result
     } catch(error:Exception) {
         code=2; envelope("schemaVersion" to 1,"status" to "failed","error" to mapOf("kind" to "output","message" to error.message))
     }

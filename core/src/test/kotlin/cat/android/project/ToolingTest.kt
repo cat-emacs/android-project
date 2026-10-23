@@ -1,5 +1,6 @@
 package cat.android.project
 
+import cat.android.project.io.jsonText as text
 import java.nio.file.Path
 import java.nio.file.Files
 import java.util.Base64
@@ -28,6 +29,13 @@ class ToolingTest {
     @Test fun `project signatures are independent of Preview assets and build outputs`() {
         root.resolve("settings.gradle.kts").writeText("rootProject.name = \"model\"")
         val before=projectInputSignature(root)
+        val settings=root.resolve("settings.gradle.kts")
+        val attributes=Files.readAttributes(settings,java.nio.file.attribute.BasicFileAttributes::class.java)
+        val changed=try { Files.getAttribute(settings,"unix:ctime").toString() }
+            catch (_:UnsupportedOperationException) { attributes.creationTime().toString() }
+            catch (_:IllegalArgumentException) { attributes.creationTime().toString() }
+        val legacy=listOf(settings.toAbsolutePath().normalize(),attributes.size(),attributes.lastModifiedTime(),changed,null).joinToString("\u0000")
+        assertEquals(cat.android.project.io.sha256(legacy.toByteArray()),before)
         Files.createDirectories(root.resolve("build"))
         root.resolve("build/Generated.kt").writeText("generated")
         root.resolve("README.md").writeText("documentation")

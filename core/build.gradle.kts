@@ -4,7 +4,7 @@ plugins {
     `maven-publish`
 }
 group = "org.cat-emacs"
-version = "0.1.0"
+version = "0.1.1"
 base { archivesName = "android-project-core" }
 repositories {
     google()
