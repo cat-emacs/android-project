@@ -38,8 +38,8 @@ android-project.el       asynchronous editor cache/selection/public queries
 The core packages its Variant API collector as a classpath resource. It has no
 Preview imports or assets. Its public `GradleTooling` / `synchronizeProject`
 interfaces can be embedded by JVM consumers; `:core:publishToMavenLocal` produces
-`org.cat-emacs:android-project-core:0.1.1`. Version 0.1.0 is published on GitHub
-Packages; 0.1.1 is the next development version and is not published yet.
+`org.cat-emacs:android-project-core:0.1.1`. Versions 0.1.0 and 0.1.1 are published
+on GitHub Packages; 0.1.1 includes the shared IO/JSON API.
 Preview embeds this versioned core library directly in its JVM; it never invokes
 the project CLI for its build. Both CLI distributions bundle the library and its
 runtime dependencies. Project synchronization in Emacs still uses this CLI.
@@ -64,8 +64,7 @@ Core publication never builds/installs the project CLI or depends on Preview.
 ### GitHub Packages publication
 
 Registry: `https://maven.pkg.github.com/cat-emacs/android-project`.
-Published coordinate: `org.cat-emacs:android-project-core:0.1.0`.
-Current development coordinate: `org.cat-emacs:android-project-core:0.1.1`.
+Current published coordinate: `org.cat-emacs:android-project-core:0.1.1`.
 
 The manually dispatched `Publish Project Core` workflow tests the committed main
 revision, publishes using its repository-scoped `GITHUB_TOKEN` with
