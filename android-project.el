@@ -602,6 +602,7 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
            (output (when (buffer-live-p buffer)
                      (with-current-buffer buffer (buffer-string))))
            (diagnostics (process-get process 'android-project-diagnostics)))
+      (message "[MODEL-DIAG] root=%S same=%S current=%S ready=%S" root (eq process current) current (process-get process 'android-project-ready))
       (unwind-protect
           (when (eq process current)
             (let ((start-fingerprint
