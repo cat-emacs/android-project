@@ -602,7 +602,6 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
            (output (when (buffer-live-p buffer)
                      (with-current-buffer buffer (buffer-string))))
            (diagnostics (process-get process 'android-project-diagnostics)))
-      (message "[MODEL-DIAG] root=%S same=%S current=%S ready=%S" root (eq process current) current (process-get process 'android-project-ready))
       (unwind-protect
           (when (eq process current)
             (let ((start-fingerprint
@@ -635,6 +634,9 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
 		  (android-project--finish-project-refresh
 		   root nil (or (alist-get 'message (android-project--cli-failure (or output "")))
                                 (string-trim (or output event))))))))
+        (when-let* ((timer (process-get process 'android-project-completion-timer)))
+          (cancel-timer timer)
+          (process-put process 'android-project-completion-timer nil))
         (when (buffer-live-p diagnostics) (kill-buffer diagnostics))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
@@ -689,6 +691,10 @@ requests for the same root share one Gradle process."
               (puthash root process android-project--project-refresh-processes)
               (android-project--set-project-model-state root 'syncing)
               (process-put process 'android-project-ready t)
+              ;; Some Emacs versions can omit pipe termination notifications.
+              (process-put process 'android-project-completion-timer
+                           (run-at-time .1 .1 #'android-project--project-refresh-sentinel
+                                        process "completion check\n"))
               ;; Keep the original sentinel: replacing it can lose an exit notice.
               (when (or (process-get process 'android-project-pending-event)
                         (memq (process-status process) '(exit signal)))

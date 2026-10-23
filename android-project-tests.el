@@ -632,6 +632,30 @@
       (should-not failure)
       (should-not (gethash root android-project--project-refresh-processes)))))
 
+(ert-deftest android-project-cli-completion-without-exit-notification ()
+  "Completion remains bounded even when a pipe omits its exit notification."
+  (let* ((root (file-name-as-directory (make-temp-file "android-no-notice" t)))
+         (android-project-cache-directory (make-temp-file "android-no-notice-cache" t))
+         (android-project--project-refresh-processes (make-hash-table :test #'equal))
+         (android-project--project-refresh-callbacks (make-hash-table :test #'equal))
+         (start (symbol-function 'android-project--start-cli-process))
+         (calls 0) result)
+    (cl-letf (((symbol-function 'android-project--gradle-model-command)
+               (lambda (_) (android-project-tests--cli-command root t)))
+              ((symbol-function 'android-project--start-cli-process)
+               (lambda (project command)
+                 (let ((process (funcall start project command)))
+                   (set-process-sentinel process #'ignore)
+                   process))))
+      (let ((process (android-refresh-project-model
+                      root (lambda (data err) (should-not err) (cl-incf calls) (setq result data))))
+            (deadline (+ (float-time) 3)))
+        (while (and (= calls 0) (< (float-time) deadline)) (accept-process-output nil .05))
+        (should (= calls 1))
+        (should result)
+        (should-not (process-get process 'android-project-completion-timer))
+        (should-not (gethash root android-project--project-refresh-processes))))))
+
 (ert-deftest android-project-cli-failure-retains-last-known-model ()
   "A failed CLI sync reports diagnostic without replacing existing metadata."
   (let* ((root (file-name-as-directory (make-temp-file "android-cli-failure" t)))
