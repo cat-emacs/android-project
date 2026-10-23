@@ -12,6 +12,31 @@ Requirements: **JDK 17+** for the CLI, **Emacs 28.1+** for the optional frontend
 Real projects need their Gradle wrapper and any SDK/toolchain required by their
 build. Set `JAVA_HOME` to the project's supported JDK.
 
+### Package managers
+
+macOS / Linux ([Homebrew tap](https://github.com/cat-emacs/homebrew-tap)):
+
+```sh
+brew install cat-emacs/tap/android-project
+```
+
+Windows ([Scoop bucket](https://github.com/cat-emacs/scoop-bucket)):
+
+```powershell
+scoop bucket add java
+scoop bucket add cat-emacs https://github.com/cat-emacs/scoop-bucket
+scoop install cat-emacs/android-project
+```
+
+Both install a JDK dependency. Set `JAVA_HOME` if a project needs a different JDK.
+
+### Direct download or source build
+
+[Releases](https://github.com/cat-emacs/android-project/releases/latest) provide
+versioned ZIP/tar.gz archives and `SHA256SUMS`. Verify, extract and add the
+archive's `bin/` to PATH; JDK 17+ must already be installed. CLI versions are
+independent of the core library version.
+
 From this checkout:
 
 ```sh
