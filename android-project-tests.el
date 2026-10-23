@@ -593,7 +593,8 @@
         (let ((deadline (+ (float-time) 5)))
           (while (and (< (length callbacks) 2) (< (float-time) deadline))
             (accept-process-output nil 0.1)))
-        (ert-info ((format "process=%S buffer=%S tracked=%S"
+        (ert-info ((format "sentinel=%S plist=%S process=%S buffer=%S tracked=%S"
+                           (process-sentinel first) (process-plist first)
                            (process-status first)
                            (when (buffer-live-p (process-buffer first))
                              (with-current-buffer (process-buffer first) (buffer-string)))
