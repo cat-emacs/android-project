@@ -120,9 +120,7 @@ wire interfaces compiled into both sides. The plugin jar is bundled as a core
 resource, so no extra artifact installation is required. Preview embeds the library in its JVM, not the project CLI.
 The Emacs frontend remains in `android-project.el`.
 
-Published artifact: **`org.cat-emacs:android-project-core:0.1.2`**. Current source
-uses **0.1.3** (not published yet); use the explicit local repository below for
-consumer development.
+Published artifact: **`org.cat-emacs:android-project-core:0.1.3`**.
 Registry: `https://maven.pkg.github.com/cat-emacs/android-project`
 
 GitHub Maven Packages requires authentication even for public packages.
