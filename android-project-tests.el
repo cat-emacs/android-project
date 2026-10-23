@@ -9,6 +9,80 @@
 (require 'ert)
 (require 'android-project)
 
+(defun android-project-tests--cli-output (root)
+  "Return a complete shared CLI model fixture for ROOT."
+  (json-encode
+   `((schemaVersion . 1) (kind . "android-project") (status . "ready")
+     (projectRoot . ,root)
+     (targets . [((buildRoot . ,root) (modulePath . ":app")
+                  (moduleRoot . ,(expand-file-name "app" root))
+                  (pluginId . "com.android.application") (projectType . "application")
+                  (variant . "debug") (namespace . "com.example")
+                  (applicationId . "com.example") (testApplicationId . "com.example.test")
+                  (debuggable . t) (sourceRoots . ["src/main/kotlin"])
+                  (components . [((kind . "main") (name . "debug") (sourceRoots . ["src/main/kotlin"]))])
+                  (previewTask . "testDebugUnitTest") (buildType . "debug")
+                  (productFlavors . []) (preferredBuildType . t) (preferredProductFlavors . []))]))))
+
+(defun android-project-tests--cli-command (root &optional delay)
+  "Return a fake CLI process producing valid model JSON for ROOT with DELAY."
+  (list shell-file-name shell-command-switch
+        (concat (when delay "sleep 0.1; ")
+                "printf '%s' " (shell-quote-argument (android-project-tests--cli-output root)))))
+
+(ert-deftest android-project-cli-model-rejects-malformed-fields ()
+  "Invalid shared target fields must not enter the public model cache."
+  (let* ((root "/tmp/project/")
+         (json-object-type 'alist) (json-array-type 'list) (json-key-type 'symbol)
+         (model (json-read-from-string (android-project-tests--cli-output root))))
+    (setf (alist-get 'sourceRoots (car (alist-get 'targets model))) 42)
+    (should-error (android-project--parse-cli-model (json-encode model) root))))
+
+(ert-deftest android-project-cli-missing-command-does-not-start-or-leak-refresh ()
+  "Missing CLI is explicit and cannot leave an active refresh entry behind."
+  (let ((android-project-cli-program "/missing-compose-preview-cli")
+        (android-project--project-refresh-processes (make-hash-table :test #'equal)))
+    (let (failure)
+      (should-not (android-refresh-project-model "/tmp/project/" (lambda (_data error) (setq failure error))))
+      (should (string-match-p "Shared CLI missing" failure)))
+    (should (= (hash-table-count android-project--project-refresh-processes) 0))
+    (should (eq (plist-get (android-project-model-status "/tmp/project/") :state) 'failed))))
+
+(ert-deftest android-project-cli-discovered-build-roots-become-inputs ()
+  "Plugin builds discovered by Tooling API remain watched in cached targets."
+  (let* ((root "/tmp/project/")
+         (json-object-type 'alist) (json-array-type 'vector) (json-key-type 'symbol)
+         (model (json-read-from-string (android-project-tests--cli-output root))))
+    (setf (alist-get 'modelBuildRoots (aref (alist-get 'targets model) 0))
+          ["/tmp/external-plugin"])
+    (let* ((targets (android-project--parse-cli-model (json-encode model) root))
+           (inputs (android-project--project-model-input-files root targets)))
+      (should (member "/tmp/external-plugin/settings.gradle.kts" inputs))
+      (should (member "/tmp/external-plugin/buildSrc" inputs)))))
+
+(ert-deftest android-project-cli-launch-failure-releases-temporary-buffers ()
+  "A failed executable launch cannot leak model/log buffers."
+  (let ((before (buffer-list)))
+    (cl-letf (((symbol-function 'make-process) (lambda (&rest _) (error "expected launch failure"))))
+      (should-error (android-project--start-cli-process "/tmp/project/" '("bad-cli"))))
+    (should-not (seq-filter (lambda (buffer)
+                              (string-prefix-p " *android-project-model" (buffer-name buffer)))
+                            (seq-difference (buffer-list) before)))))
+
+(ert-deftest android-project-cli-model-adapts-shared-targets ()
+  "Shared backend targets retain the established public target plist contract."
+  (let* ((root "/tmp/project/")
+         (entry (car (android-project--parse-cli-model (android-project-tests--cli-output root) root))))
+    (should (equal (plist-get entry :module-id) (cons root ":app")))
+    (should (equal (plist-get entry :application-id) "com.example"))
+    (should (equal (plist-get entry :test-application-id) "com.example.test"))
+    (should (plist-get entry :debuggable-p))
+    (should (equal (plist-get entry :components)
+                   '((:kind "main" :name "debug" :source-roots ("src/main/kotlin")))))
+    (should-error (android-project--parse-cli-model (android-project-tests--cli-output root) "/tmp/other/"))
+    (should-error (android-project--parse-cli-model "{\"schemaVersion\":999}" root))))
+
+
 (defun android-project-tests--target (module variant &rest properties)
   "Return target metadata for MODULE, VARIANT, and PROPERTIES."
   (let* ((root (format "/tmp/project/%s" module))
@@ -36,42 +110,14 @@
       (setq target (plist-put target (pop properties) (pop properties))))
     target))
 
-(ert-deftest android-project-parse-gradle-flavors ()
-  "Gradle flavor output is parsed between marker lines."
-  (should
-   (equal
-    (android-parse-gradle-flavors
-     "ignored\n===FLAVORS_START===\n:app|/tmp/project/app|/tmp/project|demoDebug|com.example|src/main/kotlin;src/demo/kotlin;src/androidTest/kotlin|testDemoDebugUnitTest|debug|demo|true|demo|com.android.application|com.example.test|com.example.namespace|bWFpbg==:ZGVtb0RlYnVn:c3JjL21haW4va290bGluO3NyYy9kZW1vL2tvdGxpbg==,YW5kcm9pZFRlc3Q=:ZGVtb0RlYnVnQW5kcm9pZFRlc3Q=:c3JjL2FuZHJvaWRUZXN0L2tvdGxpbg==|application|true\n===FLAVORS_END===\nignored\n")
-    '((:module-id ("/tmp/project" . ":app")
-       :build-root "/tmp/project"
-       :module-path ":app"
-       :module-name "app"
-       :module-root "/tmp/project/app"
-       :plugin-id "com.android.application"
-       :project-type "application"
-       :variant "demoDebug"
-       :namespace "com.example.namespace"
-       :debuggable-p t
-       :application-id "com.example"
-       :test-application-id "com.example.test"
-       :components ((:kind "main" :name "demoDebug"
-                     :source-roots ("src/main/kotlin" "src/demo/kotlin"))
-                    (:kind "androidTest" :name "demoDebugAndroidTest"
-                     :source-roots ("src/androidTest/kotlin")))
-       :source-roots ("src/main/kotlin" "src/demo/kotlin"
-                      "src/androidTest/kotlin")
-       :preview-task "testDemoDebugUnitTest"
-       :build-type "debug"
-       :product-flavors ("demo")
-       :preferred-build-type-p t
-       :preferred-product-flavors ("demo"))))))
+
 
 (ert-deftest android-project-flavor-helpers-use-cache ()
   "Flavor helper functions read module, variant and applicationId from cache."
   (cl-letf (((symbol-function 'android-root)
              (lambda () default-directory)))
     (let ((android-project--flavor-cache '(("app" "debug" "com.example")
-                                    ("app" "release" "com.example.release")))
+					   ("app" "release" "com.example.release")))
           (android-project--flavor-cache-root
            (file-name-as-directory (expand-file-name default-directory)))
           (android-project--flavor-cache-fingerprint nil))
@@ -96,9 +142,9 @@
       (let ((targets (android-project-targets root)))
         (should (= (length targets) 2))
         (should (equal (mapcar (lambda (entry)
-                                (cons (plist-get entry :module-name)
-                                      (plist-get entry :variant)))
-                              targets)
+                                 (cons (plist-get entry :module-name)
+                                       (plist-get entry :variant)))
+                               targets)
                        '(("app" . "debug") ("feature" . "release"))))
         (should (seq-every-p (lambda (entry)
                                (plist-get entry :selected-p))
@@ -118,7 +164,7 @@
   "Current target resolves a file's module before its selected variant."
   (let* ((root "/tmp/project/")
          (app (android-project-tests--target "app" "debug"
-                                         :application-id "com.example.app"))
+                                             :application-id "com.example.app"))
          (feature (android-project-tests--target
                    "feature" "release" :application-id "com.example.feature"))
          (android-project--selected-modules
@@ -144,9 +190,9 @@
     (cl-letf (((symbol-function 'android-project--get-flavors)
                (lambda (&optional _refresh)
                  (list (android-project-tests--target "app" "debug"
-                                                   :application-id "com.example")
+                                                      :application-id "com.example")
                        (android-project-tests--target "feature" "debug"
-                                                   :application-id "com.example")))))
+                                                      :application-id "com.example")))))
       (should-not (android-current-application-id nil nil "/tmp/project/")))))
 
 (ert-deftest android-project-project-targets-forwards-refresh ()
@@ -263,22 +309,7 @@
        (list entry))
       entry))))
 
-(ert-deftest android-project-model-script-uses-plugin-models-for-kmp ()
-  "Flavor script should use AGP/KGP models instead of hard-coded KMP paths."
-  (with-temp-buffer
-    (insert-file-contents android-project-model-script)
-    (let ((script (buffer-string)))
-      (should (string-match-p "androidComponents" script))
-      (should (string-match-p "com.android.test" script))
-      (should (string-match-p "variant.androidTest.applicationId" script))
-      (should (string-match-p "component.*sources" script))
-      (should (string-match-p "directories.*static" script))
-      (should (string-match-p "extensions.findByName(\"kotlin\")" script))
-      (should (string-match-p "compilations" script))
-      (should (string-match-p "platformType == \"jvm\"" script))
-      (should (string-match-p "desktopTest" script))
-      (should-not (string-match-p "src/commonMain/kotlin" script))
-      (should-not (string-match-p "src/androidMain/kotlin" script)))))
+
 
 (ert-deftest android-project-target-for-source-file-identifies-component ()
   "Source lookup reports the selected variant's owning component."
@@ -288,16 +319,16 @@
            "app" "debug"
            :source-roots '("src/main/kotlin" "src/androidTest/kotlin")
            :components '((:kind "main" :name "debug"
-                           :source-roots ("src/main/kotlin"))
-                          (:kind "androidTest" :name "debugAndroidTest"
-                           :source-roots ("src/androidTest/kotlin")))))
+				:source-roots ("src/main/kotlin"))
+                         (:kind "androidTest" :name "debugAndroidTest"
+				:source-roots ("src/androidTest/kotlin")))))
          (release
           (android-project-tests--target
            "app" "release"
            :source-roots '("src/main/kotlin" "src/release/kotlin")
            :components '((:kind "main" :name "release"
-                           :source-roots ("src/main/kotlin"
-                                          "src/release/kotlin")))))
+				:source-roots ("src/main/kotlin"
+                                               "src/release/kotlin")))))
          (android-project-cache-directory (make-temp-file "android-cache" t))
          (android-project--selection-loaded-roots nil)
          (android-project--selected-modules nil)
@@ -318,11 +349,11 @@
          (debug (android-project-tests--target
                  "app" "debug" :source-roots '("src/main/kotlin")
                  :components '((:kind "main" :name "debug"
-                                 :source-roots ("src/main/kotlin")))))
+                                      :source-roots ("src/main/kotlin")))))
          (release (android-project-tests--target
                    "app" "release" :source-roots '("src/release/kotlin")
                    :components '((:kind "main" :name "release"
-                                   :source-roots ("src/release/kotlin")))))
+					:source-roots ("src/release/kotlin")))))
          (android-project-cache-directory (make-temp-file "android-cache" t))
          (android-project--selection-loaded-roots nil)
          (android-project--selected-modules nil)
@@ -505,7 +536,7 @@
       (should (member (expand-file-name "gradle" root) inputs))
       (should (member logic-root inputs))
       (should (android-project--file-under-input-p build-src
-                                           (expand-file-name "buildSrc" root)))
+						   (expand-file-name "buildSrc" root)))
       (should (android-project--file-under-input-p build-logic logic-root))
       (let ((before (android-project--project-model-fingerprint root nil inputs)))
         (with-temp-file build-logic (insert "class ChangedConventionPlugin\n"))
@@ -542,9 +573,7 @@
          (android-project--flavor-cache-root nil)
          callbacks)
     (cl-letf (((symbol-function 'android-project--gradle-model-command)
-               (lambda (_root)
-                 (list shell-file-name shell-command-switch
-                       "printf '===FLAVORS_START===\\n:app|/tmp/app|/tmp|debug|com.example|src/main/kotlin|assembleDebug|debug||false||com.android.application\\n===FLAVORS_END===\\n'"))))
+               (lambda (root) (android-project-tests--cli-command root))))
       (let ((first (android-refresh-project-model
                     root (lambda (data error-data)
                            (push (list data error-data) callbacks))))
@@ -564,6 +593,50 @@
                              callbacks))
         (should-not (gethash root android-project--project-refresh-processes))))))
 
+(ert-deftest android-project-cli-failure-retains-last-known-model ()
+  "A failed CLI sync reports diagnostic without replacing existing metadata."
+  (let* ((root (file-name-as-directory (make-temp-file "android-cli-failure" t)))
+         (old (list (android-project-tests--target "app" "debug")))
+         (android-project--flavor-cache old)
+         (android-project--flavor-cache-root root)
+         (android-project--project-refresh-processes (make-hash-table :test #'equal))
+         (android-project--project-refresh-callbacks (make-hash-table :test #'equal))
+         done result failure)
+    (cl-letf (((symbol-function 'android-project--gradle-model-command)
+               (lambda (_root)
+                 (list shell-file-name shell-command-switch
+                       "printf '%s' '{\"schemaVersion\":1,\"status\":\"failed\",\"error\":{\"kind\":\"gradle\",\"message\":\"expected model failure\"}}'; exit 2"))))
+      (android-refresh-project-model root (lambda (data err) (setq result data failure err done t)))
+      (let ((deadline (+ (float-time) 5)))
+        (while (and (not done) (< (float-time) deadline)) (accept-process-output nil .05)))
+      (should done)
+      (should-not result)
+      (should (equal failure "expected model failure"))
+      (should (eq android-project--flavor-cache old))
+      (should (eq (plist-get (android-project-model-status root) :state) 'failed)))))
+
+(ert-deftest android-project-cli-stale-model-retries-with-original-callback ()
+  "Backend-detected included-build changes retry even before editor watches exist."
+  (let* ((root (file-name-as-directory (make-temp-file "android-cli-stale" t)))
+         (android-project-cache-directory (make-temp-file "android-cli-cache" t))
+         (android-project--project-refresh-processes (make-hash-table :test #'equal))
+         (android-project--project-refresh-callbacks (make-hash-table :test #'equal))
+         (android-project--project-refresh-invalidated (make-hash-table :test #'equal))
+         (launches 0) done result)
+    (cl-letf (((symbol-function 'android-project--gradle-model-command)
+               (lambda (_root)
+                 (cl-incf launches)
+                 (if (= launches 1)
+                     (list shell-file-name shell-command-switch
+                           "printf '%s' '{\"schemaVersion\":1,\"status\":\"failed\",\"error\":{\"kind\":\"stale-model\",\"message\":\"changed\"}}'; exit 2")
+                   (android-project-tests--cli-command root)))))
+      (android-refresh-project-model root (lambda (data _failure) (setq result data done t)))
+      (let ((deadline (+ (float-time) 5)))
+        (while (and (not done) (< (float-time) deadline)) (accept-process-output nil .05)))
+      (should done)
+      (should result)
+      (should (= launches 2)))))
+
 (ert-deftest android-project-project-refresh-restarts-after-input-change ()
   "A refresh whose inputs change is discarded and restarted."
   (let* ((root (file-name-as-directory (make-temp-file "android-project" t)))
@@ -576,8 +649,7 @@
     (cl-letf (((symbol-function 'android-project--gradle-model-command)
                (lambda (_root)
                  (setq launches (1+ (or launches 0)))
-                 (list shell-file-name shell-command-switch
-                       "sleep 0.1; printf '===FLAVORS_START===\\n:app|/tmp/app|/tmp|debug|com.example|src/main/kotlin|assembleDebug|debug||false||com.android.application\\n===FLAVORS_END===\\n'"))))
+                 (android-project-tests--cli-command root t))))
       (android-refresh-project-model
        root (lambda (data error-data)
               (setq result data failure error-data done t)))
@@ -597,21 +669,20 @@
          (android-project--project-refresh-processes (make-hash-table :test #'equal))
          (android-project--project-refresh-callbacks (make-hash-table :test #'equal))
          (android-project--project-refresh-invalidated (make-hash-table :test #'equal))
-         (real-parser (symbol-function 'android-parse-gradle-flavors))
+         (real-parser (symbol-function 'android-project--parse-cli-model))
          parsed launches done result)
     (with-temp-file settings (insert "include(\":app\")\n"))
     (cl-letf (((symbol-function 'android-project--gradle-model-command)
                (lambda (_root)
                  (setq launches (1+ (or launches 0)))
-                 (list shell-file-name shell-command-switch
-                       "printf '===FLAVORS_START===\\n:app|/tmp/app|/tmp|debug|com.example|src/main/kotlin|assembleDebug|debug||false||com.android.application\\n===FLAVORS_END===\\n'")))
-              ((symbol-function 'android-parse-gradle-flavors)
-               (lambda (output)
+                 (android-project-tests--cli-command root)))
+              ((symbol-function 'android-project--parse-cli-model)
+               (lambda (output project-root)
                  (unless parsed
                    (setq parsed t)
                    (with-temp-file settings
                      (insert "include(\":app\", \":feature\")\n")))
-                 (funcall real-parser output))))
+                 (funcall real-parser output project-root))))
       (android-refresh-project-model
        root (lambda (data _error-data) (setq result data done t)))
       (while (and (not done) (< launches 3))

@@ -26,6 +26,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+(require 'json)
 (require 'filenotify nil t)
 
 (defgroup android-project nil
@@ -33,12 +34,12 @@
   :group 'tools)
 
 (defvaralias 'android-mode-cache-dir 'android-project-cache-directory)
-(defvaralias 'android-mode-flavor-script 'android-project-model-script)
 
-(defvar android-project-model-script
-  (expand-file-name "listFlavorAppId.gradle"
-                    (file-name-directory (or load-file-name buffer-file-name)))
-  "Gradle init script used to collect Android project metadata.")
+(defcustom android-project-cli-program "compose-preview"
+  "Shared Kotlin CLI used for Gradle/AGP model synchronization.
+This package owns Emacs selection/cache state, not a second Gradle CLI."
+  :type 'string
+  :group 'android-project)
 
 (defvar android-project--selected-modules nil
   "Alist of current Android module IDs keyed by project root.")
@@ -75,7 +76,7 @@ The form is not executed when no project root directory can be found."
   :type 'string
   :group 'android-project)
 
-(defconst android-project--flavor-cache-version 9
+(defconst android-project--flavor-cache-version 10
   "Flavor cache schema version.")
 
 (defvar android-project-model-updated-hook nil
@@ -226,9 +227,10 @@ The :state value is one of `not-loaded', `needs-sync', `syncing', `ready', or
   "Return model input files for ROOT and cached model DATA."
   (let* ((build-roots
           (delete-dups
-           (cons root (delq nil (mapcar (lambda (entry)
-                                         (plist-get entry :build-root))
-                                       data)))))
+           (cons root (append (delq nil (mapcar (lambda (entry)
+                                                  (plist-get entry :build-root)) data))
+                              (apply #'append (mapcar (lambda (entry)
+                                                        (plist-get entry :model-build-roots)) data))))))
          (module-roots
           (delete-dups (delq nil (mapcar (lambda (entry)
                                            (plist-get entry :module-root))
@@ -482,10 +484,75 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
        (not android-project--flavor-cache-stale-p)))
 
 (defun android-project--gradle-model-command (root)
-  "Return the Gradle project model command for ROOT."
-  (list (expand-file-name "gradlew" root)
-        "--no-configuration-cache" "-I" android-project-model-script
-        "help" "--quiet"))
+  "Return the shared CLI model synchronization command for ROOT."
+  (let ((program (executable-find android-project-cli-program)))
+    (unless program
+      (user-error "Shared CLI missing: install compose-preview or set android-project-cli-program"))
+    (list program "project" "sync" "--project" root "--json")))
+
+(defun android-project--json-string-list-p (value)
+  "Return non-nil when VALUE is a JSON array of strings."
+  (and (vectorp value) (seq-every-p #'stringp value)))
+
+(defun android-project--parse-cli-model (output root)
+  "Validate shared CLI OUTPUT for ROOT and adapt targets to the public plists."
+  (let* ((json-object-type 'alist) (json-array-type 'vector) (json-key-type 'symbol)
+         (json-false :json-false) (json-null :json-null)
+         (model (json-read-from-string output))
+         (targets (alist-get 'targets model)))
+    (unless (and (equal (alist-get 'schemaVersion model) 1)
+                 (equal (alist-get 'kind model) "android-project")
+                 (equal (alist-get 'status model) "ready")
+                 (equal (file-name-as-directory (expand-file-name (alist-get 'projectRoot model)))
+                        (file-name-as-directory (expand-file-name root)))
+                 (vectorp targets) (> (length targets) 0))
+      (error "Invalid or incompatible shared project model"))
+    (mapcar
+     (lambda (entry)
+       (dolist (key '(buildRoot modulePath moduleRoot variant pluginId namespace projectType))
+         (unless (stringp (alist-get key entry)) (error "Missing target field %s" key)))
+       (dolist (key '(applicationId testApplicationId previewTask buildType))
+         (unless (stringp (alist-get key entry)) (error "Invalid target field %s" key)))
+       (dolist (key '(sourceRoots productFlavors preferredProductFlavors))
+         (unless (android-project--json-string-list-p (alist-get key entry))
+           (error "Invalid target array %s" key)))
+       (dolist (key '(debuggable preferredBuildType))
+         (unless (memq (alist-get key entry) '(t :json-false)) (error "Invalid boolean %s" key)))
+       (unless (vectorp (alist-get 'components entry)) (error "Invalid components"))
+       (dolist (component (append (alist-get 'components entry) nil))
+         (unless (and (stringp (alist-get 'kind component))
+                      (stringp (alist-get 'name component))
+                      (android-project--json-string-list-p (alist-get 'sourceRoots component)))
+           (error "Invalid component source ownership")))
+       (when (assq 'modelBuildRoots entry)
+         (unless (android-project--json-string-list-p (alist-get 'modelBuildRoots entry))
+           (error "Invalid included build roots")))
+       (let ((build-root (alist-get 'buildRoot entry))
+             (module-path (alist-get 'modulePath entry)))
+         (list :module-id (cons build-root module-path)
+               :build-root build-root :model-build-roots (append (alist-get 'modelBuildRoots entry) nil)
+               :module-path module-path
+               :module-name (string-remove-prefix ":" module-path)
+               :module-root (alist-get 'moduleRoot entry)
+               :variant (alist-get 'variant entry)
+               :plugin-id (alist-get 'pluginId entry)
+               :namespace (alist-get 'namespace entry)
+               :project-type (alist-get 'projectType entry)
+               :debuggable-p (eq (alist-get 'debuggable entry) t)
+               :application-id (or (alist-get 'applicationId entry) "")
+               :test-application-id (or (alist-get 'testApplicationId entry) "")
+               :source-roots (append (alist-get 'sourceRoots entry) nil)
+               :components (mapcar (lambda (component)
+                                     (list :kind (alist-get 'kind component)
+                                           :name (alist-get 'name component)
+                                           :source-roots (append (alist-get 'sourceRoots component) nil)))
+                                   (append (alist-get 'components entry) nil))
+               :preview-task (or (alist-get 'previewTask entry) "")
+               :build-type (or (alist-get 'buildType entry) "")
+               :product-flavors (append (alist-get 'productFlavors entry) nil)
+               :preferred-build-type-p (eq (alist-get 'preferredBuildType entry) t)
+               :preferred-product-flavors (append (alist-get 'preferredProductFlavors entry) nil))))
+     (append targets nil))))
 
 (defun android-project--finish-project-refresh (root data error-data)
   "Finish the project model refresh for ROOT with DATA or ERROR-DATA."
@@ -517,6 +584,15 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
   (android-project--set-project-model-state root 'needs-sync)
   (android-refresh-project-model root))
 
+(defun android-project--cli-failure (output)
+  "Return structured CLI error details from OUTPUT, or nil."
+  (condition-case nil
+      (let* ((json-object-type 'alist) (json-array-type 'vector) (json-key-type 'symbol)
+             (model (json-read-from-string output)))
+        (when (equal (alist-get 'status model) "failed")
+          (alist-get 'error model)))
+    (error nil)))
+
 (defun android-project--project-refresh-sentinel (process event)
   "Handle project model refresh PROCESS completion described by EVENT."
   (when (memq (process-status process) '(exit signal))
@@ -524,35 +600,60 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
            (buffer (process-buffer process))
            (current (gethash root android-project--project-refresh-processes))
            (output (when (buffer-live-p buffer)
-                     (with-current-buffer buffer (buffer-string)))))
-      (when (eq process current)
-        (let ((start-fingerprint
-               (process-get process 'android-project-input-fingerprint))
-              (inputs (process-get process 'android-project-inputs)))
-          (if (android-project--project-refresh-stale-p
-               root start-fingerprint inputs)
-              (progn
-                (remhash root android-project--project-refresh-invalidated)
-                (android-project--restart-project-refresh
-                 root (gethash root android-project--project-refresh-callbacks)))
-            (if (and (= (process-exit-status process) 0) output)
-                (let ((data (android-parse-gradle-flavors output)))
-                  (cond
-                   ((android-project--project-refresh-stale-p
-                     root start-fingerprint inputs)
+                     (with-current-buffer buffer (buffer-string))))
+           (diagnostics (process-get process 'android-project-diagnostics)))
+      (unwind-protect
+          (when (eq process current)
+            (let ((start-fingerprint
+		   (process-get process 'android-project-input-fingerprint))
+		  (inputs (process-get process 'android-project-inputs)))
+              (if (or (android-project--project-refresh-stale-p root start-fingerprint inputs)
+                      (equal (alist-get 'kind (android-project--cli-failure (or output ""))) "stale-model"))
+		  (progn
                     (remhash root android-project--project-refresh-invalidated)
                     (android-project--restart-project-refresh
                      root (gethash root android-project--project-refresh-callbacks)))
-                   (data
-                    (android-project--log "refreshed %d flavor entries" (length data))
-                    (android-project--finish-project-refresh root data nil))
-                   (t
-                    (android-project--finish-project-refresh
-                     root nil "Gradle returned no Android project model"))))
-              (android-project--finish-project-refresh
-               root nil (string-trim (or output event)))))))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
+		(if (and (= (process-exit-status process) 0) output)
+                    (let ((data (condition-case err
+                                    (android-project--parse-cli-model output root)
+				  (error
+				   (android-project--log "model response rejected: %s" (error-message-string err))
+				   nil))))
+                      (cond
+                       ((android-project--project-refresh-stale-p
+			 root start-fingerprint inputs)
+			(remhash root android-project--project-refresh-invalidated)
+			(android-project--restart-project-refresh
+			 root (gethash root android-project--project-refresh-callbacks)))
+                       (data
+			(android-project--log "refreshed %d flavor entries" (length data))
+			(android-project--finish-project-refresh root data nil))
+                       (t
+			(android-project--finish-project-refresh
+			 root nil "Gradle returned no Android project model"))))
+		  (android-project--finish-project-refresh
+		   root nil (or (alist-get 'message (android-project--cli-failure (or output "")))
+                                (string-trim (or output event))))))))
+        (when (buffer-live-p diagnostics) (kill-buffer diagnostics))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(defun android-project--start-cli-process (root command)
+  "Start ROOT model COMMAND, cleaning temporary buffers on launch failure."
+  (let ((buffer (generate-new-buffer " *android-project-model*"))
+        (diagnostics (generate-new-buffer " *android-project-model-log*")))
+    (condition-case err
+        (let ((process (make-process
+                        :name (format "android-project-model-%s"
+                                      (file-name-nondirectory (directory-file-name root)))
+                        :buffer buffer :stderr diagnostics :command command
+                        :connection-type 'pipe :noquery t :sentinel #'ignore)))
+          (process-put process 'android-project-diagnostics diagnostics)
+          process)
+      (error
+       (kill-buffer buffer)
+       (kill-buffer diagnostics)
+       (signal (car err) (cdr err))))))
 
 (defun android-refresh-project-model (&optional project-root callback)
   "Refresh PROJECT-ROOT asynchronously and return its process.
@@ -565,31 +666,29 @@ requests for the same root share one Gradle process."
                        (list callback))
                android-project--project-refresh-callbacks))
     (or (gethash root android-project--project-refresh-processes)
-        (let* ((inputs (android-project--project-model-input-files
-                        root (and (string= root android-project--flavor-cache-root)
-                                  android-project--flavor-cache)))
-               (fingerprint (android-project--project-model-fingerprint root nil inputs))
-               (buffer (generate-new-buffer " *android-project-model*"))
-               (default-directory root)
-               (process
-                (make-process
-                 :name (format "android-project-model-%s"
-                               (file-name-nondirectory
-                                (directory-file-name root)))
-                 :buffer buffer :command (android-project--gradle-model-command root)
-                 :connection-type 'pipe :noquery t
-                 :sentinel #'ignore)))
-          (with-current-buffer buffer
-            (setq-local default-directory root))
-          (process-put process 'android-project-root root)
-          (process-put process 'android-project-inputs inputs)
-          (process-put process 'android-project-input-fingerprint fingerprint)
-          (remhash root android-project--project-refresh-invalidated)
-          (puthash root process android-project--project-refresh-processes)
-          (android-project--set-project-model-state root 'syncing)
-          (set-process-sentinel process #'android-project--project-refresh-sentinel)
-          (android-project--log "refreshing project model for %s asynchronously" root)
-          process))))
+        (condition-case err
+            (let* ((inputs (android-project--project-model-input-files
+                            root (and (string= root android-project--flavor-cache-root)
+                                      android-project--flavor-cache)))
+		   (fingerprint (android-project--project-model-fingerprint root nil inputs))
+		   (command (android-project--gradle-model-command root))
+                   (default-directory root)
+                   (process (android-project--start-cli-process root command))
+                   (buffer (process-buffer process)))
+              (with-current-buffer buffer
+		(setq-local default-directory root))
+              (process-put process 'android-project-root root)
+              (process-put process 'android-project-inputs inputs)
+              (process-put process 'android-project-input-fingerprint fingerprint)
+              (remhash root android-project--project-refresh-invalidated)
+              (puthash root process android-project--project-refresh-processes)
+              (android-project--set-project-model-state root 'syncing)
+              (set-process-sentinel process #'android-project--project-refresh-sentinel)
+              (android-project--log "refreshing project model for %s asynchronously" root)
+              process)
+          (error
+           (android-project--finish-project-refresh root nil (error-message-string err))
+           nil)))))
 
 (defun android-project--get-flavors (&optional refresh)
   "Return flavor data while refreshing stale metadata asynchronously.
@@ -622,67 +721,11 @@ Gradle and keeps returning an available last-known in-memory model."
         (android-refresh-project-model root)
         memory)))))
 
-(defun android-project--decode-component-field (value)
-  "Decode Base64 component field VALUE as UTF-8."
-  (decode-coding-string (base64-decode-string (or value "")) 'utf-8))
 
-(defun android-project--parse-components (value)
-  "Parse encoded component metadata VALUE into plists."
-  (mapcar
-   (lambda (record)
-     (pcase-let ((`(,kind ,name ,source-roots)
-                  (split-string record ":" nil)))
-       (list :kind (android-project--decode-component-field kind)
-             :name (android-project--decode-component-field name)
-             :source-roots
-             (split-string
-              (android-project--decode-component-field source-roots) ";" t))))
-   (split-string (or value "") "," t)))
 
-(defun android-parse-gradle-flavors (gradle-output)
-  "Parse GRADLE-OUTPUT and return Android module metadata plists.
-Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
-  (let ((in-flavors nil)
-        (result '()))
-    (dolist (line (split-string gradle-output "\n" t))
-      (cond
-       ((string-match-p "===FLAVORS_START===" line)
-        (setq in-flavors t))
-       ((string-match-p "===FLAVORS_END===" line)
-        (setq in-flavors nil))
-       (in-flavors
-        (pcase-let ((`(,module-path ,module-root ,build-root ,variant ,appid
-                         ,source-roots ,preview-task ,build-type
-                         ,product-flavors ,preferred-build-type
-                         ,preferred-product-flavors ,plugin-id
-                         ,test-application-id ,namespace ,components
-                         ,project-type ,debuggable)
-                       (split-string line "|" nil)))
-          (when (and module-path module-root variant)
-            (push (list :module-id (cons build-root module-path)
-                        :build-root build-root
-                        :module-path module-path
-                        :module-name (string-remove-prefix ":" module-path)
-                        :module-root module-root
-                        :plugin-id (or plugin-id "")
-                        :project-type (or project-type "")
-                        :variant variant
-                        :namespace (or namespace "")
-                        :debuggable-p (equal debuggable "true")
-                        :application-id (or appid "")
-                        :test-application-id (or test-application-id "")
-                        :components (android-project--parse-components components)
-                        :source-roots (split-string (or source-roots "") ";" t)
-                        :preview-task (or preview-task "")
-                        :build-type (or build-type "")
-                        :product-flavors
-                        (split-string (or product-flavors "") "," t)
-                        :preferred-build-type-p
-                        (equal preferred-build-type "true")
-                        :preferred-product-flavors
-                        (split-string (or preferred-product-flavors "") "," t))
-                  result))))))
-    (nreverse result)))
+
+
+
 
 (defun android-project--flavor-field (entry index property)
   "Return ENTRY field from plist PROPERTY or legacy tuple INDEX."
