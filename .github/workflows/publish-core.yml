@@ -40,8 +40,10 @@ jobs:
         run: |
           ACTUAL=$(./gradlew :core:properties --console=plain -q | awk '/^version: / {print $2}')
           test "$ACTUAL" = "$RELEASE_VERSION"
-      - name: Install frontend check dependency
-        run: sudo apt-get update && sudo apt-get install -y emacs-nox
+      - name: Set up frontend check dependency
+        uses: purcell/setup-emacs@1f1e9c315c2e3312705e920ae1ddd7e0e2b13c69
+        with:
+          version: '31.1'
       - name: Test project backend and frontend
         run: |
           ./gradlew :core:test :cli:test :cli:installDist --console=plain
