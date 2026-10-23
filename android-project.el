@@ -684,6 +684,10 @@ requests for the same root share one Gradle process."
               (puthash root process android-project--project-refresh-processes)
               (android-project--set-project-model-state root 'syncing)
               (set-process-sentinel process #'android-project--project-refresh-sentinel)
+              ;; A fast CLI can exit while metadata is installed under `ignore'.
+              (when (memq (process-status process) '(exit signal))
+                (run-at-time 0 nil #'android-project--project-refresh-sentinel
+                             process "finished during setup\n"))
               (android-project--log "refreshing project model for %s asynchronously" root)
               process)
           (error
