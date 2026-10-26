@@ -3,6 +3,8 @@ package cat.android.project.cli
 import cat.android.project.GradleTooling
 import cat.android.project.ProjectFailure
 import cat.android.project.synchronizeProject
+import cat.android.project.synchronizeDependencies
+import cat.android.project.io.readJsonObject
 import cat.android.project.TargetSelection
 import cat.android.project.io.atomicJson
 import cat.android.project.io.jsonCodec as gson
@@ -22,7 +24,7 @@ private class Arguments(raw: List<String>) {
             val token=args[index++]
             if (!token.startsWith("--")) throw ProjectFailure("Unexpected argument $token","input")
             val parts=token.removePrefix("--").split('=',limit=2)
-            if (parts[0] !in setOf("project","task","gradle-arg","init-script","timeout","result-file","selection-file","dependencies"))
+            if (parts[0] !in setOf("project","task","gradle-arg","init-script","timeout","result-file","selection-file","dependencies","metadata-file"))
                 throw ProjectFailure("Unknown option --${parts[0]}","input")
             val value=parts.getOrNull(1) ?: args.getOrNull(index++) ?: throw ProjectFailure("Missing $token value","input")
             values.getOrPut(parts[0]) { mutableListOf() }.add(value)
@@ -43,6 +45,8 @@ Usage: android-project <command> [--json] [options]
   sync --project DIR [--timeout SECONDS]        Gradle build/module and Android target metadata
        [--dependencies none|requested|selected] Default none; requested uses exact selection-file targets
        [--selection-file JSON]                 [{buildRoot,modulePath,variant}] dependency selections
+  dependencies --project DIR --metadata-file JSON --selection-file JSON
+                                               Exact graphs against a fresh metadata context
   build --project DIR --task :app:task          Cancellable Tooling API task execution
         [--init-script FILE] [--gradle-arg=ARG] [--timeout SECONDS]
 Output: schemaVersion=1 JSON on stdout; progress/build output on stderr.
@@ -58,7 +62,7 @@ No renderer, layoutlib, editor state, or Preview CLI is required.""")
             "doctor" -> envelope("schemaVersion" to 1,"kind" to "android-project","status" to "ready",
                 "javaVersion" to System.getProperty("java.version"),"gradleToolingApi" to "9.6.1","agpModelConsumer" to "9.3.0",
                 "authRequired" to false,"capabilities" to mapOf("projectSync" to true,"taskExecution" to true,"dependencyResolution" to false))
-            "sync" -> {
+            "sync", "dependencies" -> {
                 val selections=args.get("selection-file")?.let { file ->
                     val value=Files.newBufferedReader(Path.of(file)).use { JsonParser.parseReader(it) }
                     if(!value.isJsonArray) throw ProjectFailure("Selection file must be an array","input")
@@ -73,7 +77,10 @@ No renderer, layoutlib, editor state, or Preview CLI is required.""")
                         TargetSelection(Path.of(field("buildRoot")).toFile().canonicalPath,field("modulePath"),field("variant"))
                     }
                 } ?: emptyList()
-                synchronizeProject(args.root(),args.timeout(),selections,args.get("dependencies") ?: "none")
+                if (args.command == "dependencies") {
+                    val file=args.get("metadata-file") ?: throw ProjectFailure("Specify --metadata-file", "input")
+                    synchronizeDependencies(args.root(),readJsonObject(Path.of(file)),selections,args.timeout())
+                } else synchronizeProject(args.root(),args.timeout(),selections,args.get("dependencies") ?: "none")
             }
             "build" -> {
                 val root=args.root()

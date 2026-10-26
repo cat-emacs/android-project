@@ -121,8 +121,8 @@ wire interfaces compiled into both sides. The plugin jar is bundled as a core
 resource, so no extra artifact installation is required. Preview embeds the library in its JVM, not the project CLI.
 The Emacs frontend remains in `android-project.el`.
 
-Published artifact: **`org.cat-emacs:android-project-core:0.1.5`**. The current
-source uses this version; an explicit local repository is optional for development.
+Published artifact: **`org.cat-emacs:android-project-core:0.1.5`**. Current source
+uses **0.1.6** (not published); use the explicit local repository for development.
 Registry: `https://maven.pkg.github.com/cat-emacs/android-project`
 
 GitHub Maven Packages requires authentication even for public packages.
@@ -158,9 +158,35 @@ resolves implicit defaults. Stale selections are reported in `selectionIssues`.
 `android-project-dependencies` returns immediately and queues one async request
 for a missing graph; repeated reads share the active sync. Requests are combined
 per project, updated on variant selection, and passed through a private temporary
-file. New demands/selections arriving during sync invalidate its result and retain
-callbacks for retry. Metadata-only startup does not request all module graphs.
+file. Changed selections arriving during sync invalidate its result and retain
+callbacks for retry; newly added module demands queue a follow-up. Metadata-only startup does not request all module graphs.
 No persistent dependency cache bypasses input/freshness validation.
+
+Within a session, demands arriving within 100 ms share one request. A fresh
+metadata sync returns a `dependencyContext` containing only typed mapping data,
+input signatures and a metadata ID. The frontend keeps this context in memory,
+not in its disk cache. Subsequent demands use `dependencies` to fetch only missing
+exact graphs, without re-fetching AGP metadata or injecting the supplement plugin:
+
+```sh
+android-project sync --project /path/project --result-file model.json --json
+# Extract model.json's dependencyContext into context.json, then:
+android-project dependencies --project /path/project \
+  --metadata-file context.json --selection-file targets.json --json
+```
+
+Responses contain only graphs and the metadata ID. Both CLI input checks and
+frontend generation checks must pass before an atomic merge. Added module demands
+retain valid in-flight results and queue only missing graphs; variant changes
+reject old results. Changed inputs/build structure produce `stale-baseline` or
+`stale-model`; the frontend falls back to full metadata sync with callbacks intact.
+The CLI does not silently fall back. Core/consumer, Java home and Gradle user home
+also participate in context identity. Dynamic external inputs remain outside this
+conservative file-signature contract; force a full sync when they change.
+
+stderr `sync-timing` and frontend logs distinguish metadata/dependency mode and
+request counts. Gradle configuration still occurs: reduced model traffic is not
+configuration-cache reuse or a promise of a large latency reduction.
 
 The current KMP fixture's AGP V2 dependency model is unavailable for KMP modules;
 they report `unsupported`. Ordinary Android modules depending on KMP can expose

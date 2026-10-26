@@ -49,6 +49,16 @@ class CliTest {
             assertEquals("input",JsonParser.parseString(output).asJsonObject["error"].asJsonObject["kind"].asString)
         }
     }
+    @Test fun `dependency sync rejects missing or malformed baseline before connecting`() {
+        val (status,output)=run("dependencies","--json")
+        assertEquals(2,status)
+        assertEquals("input",JsonParser.parseString(output).asJsonObject["error"].asJsonObject["kind"].asString)
+        val file=directory.resolve("metadata.json")
+        file.writeText("{}")
+        val (badStatus,badOutput)=run("dependencies","--metadata-file",file.toString(),"--json")
+        assertEquals(2,badStatus)
+        assertEquals("stale-baseline",JsonParser.parseString(badOutput).asJsonObject["error"].asJsonObject["kind"].asString)
+    }
     @Test fun `malformed options and unsupported no daemon are rejected`() {
         for(args in listOf(arrayOf("sync","--no-daemon","--json"),arrayOf("build","--timeout","-1","--json"),arrayOf("unknown","--json"))) {
             val (status,output)=run(*args)

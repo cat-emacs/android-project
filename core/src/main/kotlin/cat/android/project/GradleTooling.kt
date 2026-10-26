@@ -4,8 +4,6 @@ import cat.android.project.io.jsonCodec as gson
 import cat.android.project.io.jsonObject as obj
 import cat.android.project.tooling.TargetModel
 import com.android.builder.model.v2.models.AndroidProject
-import com.android.builder.model.v2.models.ModelBuilderParameter
-import com.android.builder.model.v2.models.VariantDependencies
 import org.gradle.tooling.model.gradle.BasicGradleProject
 import com.android.builder.model.v2.models.AndroidDsl
 import com.android.builder.model.v2.models.BasicAndroidProject
@@ -28,7 +26,8 @@ data class ProjectModule(
 ) : Serializable
 data class ProjectStructure(val modules: List<ProjectModule>, val buildRoots: List<String>,
     val targets: List<TargetModel.TargetData>, val dependencies: List<DependencySnapshot> = emptyList(),
-    val buildPaths: Map<String,String> = emptyMap(), val selectionIssues: List<String> = emptyList()) : Serializable
+    val buildPaths: Map<String,String> = emptyMap(), val selectionIssues: List<String> = emptyList(),
+    val dimensions: List<ModuleDimensions> = emptyList(), val inputSignatures: Map<String,String> = emptyMap()) : Serializable
 
 /** Discovery must not fetch Android or supplement models that the next action will read. */
 internal class BuildRootsAction : BuildAction<List<String>>, Serializable {
@@ -108,31 +107,12 @@ internal class ProjectStructureAction(private val selections: List<TargetSelecti
         }
         visit(controller.buildModel)
         val dependencyTargets = requestedDependencyTargets(targets,selections,dependencyMode)
-        val dependencies = dependencyTargets.map { target ->
-            val project = projects.getValue(target.buildRoot to target.modulePath)
-            try {
-                val model = controller.findModel(project,VariantDependencies::class.java,ModelBuilderParameter::class.java) { parameter ->
-                    parameter.variantName = target.variant
-                    parameter.dontBuildRuntimeClasspath = false
-                    parameter.dontBuildUnitTestRuntimeClasspath = true
-                    parameter.dontBuildScreenshotTestRuntimeClasspath = true
-                    parameter.dontBuildAndroidTestRuntimeClasspath = true
-                    parameter.dontBuildTestFixtureRuntimeClasspath = true
-                    parameter.dontBuildHostTestRuntimeClasspath = emptyMap()
-                    parameter.additionalArtifactsInModel = false
-                }
-                if(model == null) DependencySnapshot(target.buildRoot,target.modulePath,target.variant,"unsupported",emptyList(),
-                    listOf("AGP V2 VariantDependencies unavailable"))
-                else dependencySnapshot(target,model,buildPaths,targets,dimensions)
-            } catch(error:RuntimeException) {
-                DependencySnapshot(target.buildRoot,target.modulePath,target.variant,"failed",emptyList(),
-                    listOf(error.message ?: error.javaClass.name))
-            }
-        }
+        val dependencies = fetchDependencies(controller,projects,dependencyTargets,buildPaths,targets,dimensions)
         val selectionIssues=selections.filter { selection -> targets.none {
             it.buildRoot == selection.buildRoot && it.modulePath == selection.modulePath && it.variant == selection.variant
         } }.map { "Stale dependency selection ignored: $it" }
-        return ProjectStructure(modules, roots.toList(), targets, dependencies, buildPaths, selectionIssues)
+        return ProjectStructure(modules, roots.toList(), targets, dependencies, buildPaths, selectionIssues,
+            dimensions.map { (id,names) -> ModuleDimensions(id.first,id.second,names) })
     }
 }
 
@@ -215,7 +195,23 @@ class GradleTooling(private val testInstallation: Path? = null) : AutoCloseable 
         System.err.println("sync-timing: discovery=${millis(started,discoveredAt)}ms " +
             "input-baseline=${millis(discoveredAt,guardedAt)}ms models=${millis(guardedAt,fetchedAt)}ms " +
             "input-check=${millis(fetchedAt,checkedAt)}ms dependencies=${structure.dependencies.size}")
-        return structure
+        return structure.copy(inputSignatures = buildInputs)
+    }
+    internal fun dependencies(root: Path, baseline: MetadataBaseline, selections: List<TargetSelection>, timeout: Long): List<DependencySnapshot> {
+        val started = System.nanoTime()
+        baseline.checkInputs()
+        val guarded = System.nanoTime()
+        val action = connect(root).action(ProjectDependenciesAction(baseline.structure,selections))
+        configure(action,listOf("--no-configuration-cache", "--no-configure-on-demand", "--console=plain"),emptyMap(),System.err)
+        val result = await<DependencyResult>(timeout) { action.run(it) }
+        if (!result.matches) throw ProjectFailure("Gradle structure changed; full metadata required", "stale-baseline")
+        val fetched = System.nanoTime()
+        try { baseline.checkInputs() }
+        catch (_: ProjectFailure) { throw ProjectFailure("Inputs changed during dependency sync; retry", "stale-model") }
+        System.err.println("sync-timing: mode=dependencies input-baseline=${(guarded-started)/1_000_000}ms " +
+            "models=${(fetched-guarded)/1_000_000}ms input-check=${(System.nanoTime()-fetched)/1_000_000}ms " +
+            "metadata-models=0 dependencies=${result.dependencies.size}")
+        return result.dependencies
     }
     /** Cancel this operation, without stopping Gradle or Kotlin daemons. */
     fun cancel() { cancellation.cancel() }
@@ -254,6 +250,7 @@ internal fun synchronizeProject(project: Path, script: Path, plugin: Path, timeo
     return obj("schemaVersion" to 1, "kind" to "android-project", "status" to "ready",
         "projectRoot" to root.toString(), "transport" to "gradle-tooling-api", "modules" to structure.modules,
         "buildRoots" to structure.buildRoots, "targets" to jsonTargets, "selectionIssues" to structure.selectionIssues,
+        "dependencyContext" to metadataContext(root,structure),
         "capabilities" to obj("agpV2Basic" to structure.modules.any { it.projectType != null },
             "variantSupplement" to true, "typedToolingModel" to true,
             "agpV2Details" to structure.modules.any { "AndroidProject" in it.fetchedModels && "AndroidDsl" in it.fetchedModels },

@@ -617,11 +617,83 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
 (defvar android-project--dependency-requests (make-hash-table :test #'equal)
   "Exact dependency targets requested per project root.")
 
-(defun android-project--selection-signature (root)
-  "Return the variant selection identity used by a sync for ROOT."
-  (secure-hash 'sha256 (prin1-to-string
-                       (list (cdr (assoc root android-project--selected-variants))
-                             (gethash root android-project--dependency-requests)))))
+(defvar android-project--dependency-contexts (make-hash-table :test #'equal)
+  "Accepted CLI metadata contexts for this session only.")
+
+(defvar android-project--dependency-timers (make-hash-table :test #'equal)
+  "Short request-coalescing timers per project.")
+
+(defun android-project--schedule-dependencies (root)
+  "Coalesce ROOT dependency demands without blocking public queries."
+  (unless (or (gethash root android-project--project-refresh-processes)
+              (gethash root android-project--dependency-timers))
+    (puthash root (run-at-time .1 nil #'android-project--refresh-dependencies root)
+             android-project--dependency-timers)))
+
+(defun android-project--pending-dependencies (root)
+  "Return demanded targets for ROOT that have no accepted snapshot."
+  (seq-filter
+   (lambda (request)
+     (let ((target (and (equal root android-project--flavor-cache-root)
+                        (seq-find (lambda (entry)
+                                    (and (equal (plist-get entry :module-id) (car request))
+                                         (equal (plist-get entry :variant) (cdr request))))
+                                  android-project--flavor-cache))))
+       (or (null target) (eq (plist-get (plist-get target :dependencies) :state) 'not-requested))))
+   (gethash root android-project--dependency-requests)))
+
+(defun android-project--refresh-dependencies (root)
+  "Start a dependency-only refresh for ROOT when metadata is current."
+  (when-let* ((timer (gethash root android-project--dependency-timers)))
+    (cancel-timer timer)
+    (remhash root android-project--dependency-timers))
+  (unless (gethash root android-project--project-refresh-processes)
+    (when (android-project--pending-dependencies root)
+      (android-refresh-project-model root nil t))))
+
+(defun android-project--metadata-generation-current-p (process root)
+  "Return non-nil if PROCESS still refers to ROOT's accepted metadata."
+  (or (not (process-get process 'android-project-context))
+      (and (equal root android-project--flavor-cache-root)
+           (eq (process-get process 'android-project-base-data) android-project--flavor-cache)
+           (eq (process-get process 'android-project-context)
+               (gethash root android-project--dependency-contexts)))))
+
+(defun android-project--requests-compatible-p (process root)
+  "Allow only new modules, not changed variants, during PROCESS for ROOT."
+  (let ((before (process-get process 'android-project-demand))
+        (after (gethash root android-project--dependency-requests)))
+    (and (equal (process-get process 'android-project-variants)
+                (cdr (assoc root android-project--selected-variants)))
+         (seq-every-p (lambda (request) (member request after)) before))))
+
+(defun android-project--merge-dependency-output (output root context data requests)
+  "Validate OUTPUT against CONTEXT and merge REQUESTS into ROOT DATA atomically."
+  (let* ((json-object-type 'alist) (json-array-type 'vector) (json-key-type 'symbol)
+         (json-false :json-false) (json-null :json-null)
+         (model (json-read-from-string output))
+         (snapshots (alist-get 'dependencies model))
+         (remaining (copy-tree requests))
+         (result (copy-tree data)))
+    (unless (and (equal (alist-get 'schemaVersion model) 1)
+                 (equal (alist-get 'kind model) "android-project-dependencies")
+                 (equal (alist-get 'status model) "ready")
+                 (equal (file-name-as-directory (alist-get 'projectRoot model)) root)
+                 (equal (alist-get 'metadataId model) (alist-get 'id context))
+                 (vectorp snapshots) (= (length snapshots) (length requests)))
+      (error "Invalid dependency response identity"))
+    (dolist (snapshot (append snapshots nil))
+      (let* ((build (alist-get 'buildRoot snapshot)) (module (alist-get 'modulePath snapshot))
+             (variant (alist-get 'variant snapshot))
+             (request (cons (cons build module) variant))
+             (target (seq-find (lambda (entry)
+                                 (and (equal (plist-get entry :module-id) (car request))
+                                      (equal (plist-get entry :variant) variant))) result)))
+        (unless (and target (member request remaining)) (error "Unexpected dependency target"))
+        (setq remaining (delete request remaining))
+        (setf (plist-get target :dependencies)
+              (android-project--parse-dependencies snapshot build module variant))))
+    result))
 
 (defun android-project--project-refresh-stale-p (root start-fingerprint inputs)
   "Return non-nil if ROOT's INPUTS changed from START-FINGERPRINT."
@@ -632,6 +704,7 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
 (defun android-project--restart-project-refresh (root callbacks)
   "Restart a stale refresh for ROOT and preserve CALLBACKS."
   (remhash root android-project--project-refresh-processes)
+  (remhash root android-project--dependency-contexts)
   (puthash root callbacks android-project--project-refresh-callbacks)
   (android-project--log "project inputs changed during refresh; restarting %s" root)
   (android-project--set-project-model-state root 'needs-sync)
@@ -661,29 +734,55 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
 		   (process-get process 'android-project-input-fingerprint))
 		  (inputs (process-get process 'android-project-inputs)))
               (if (or (android-project--project-refresh-stale-p root start-fingerprint inputs)
-                      (not (equal (process-get process 'android-project-selection-signature)
-                                  (android-project--selection-signature root)))
-                      (equal (alist-get 'kind (android-project--cli-failure (or output ""))) "stale-model"))
+                      (not (android-project--requests-compatible-p process root))
+                      (not (android-project--metadata-generation-current-p process root))
+                      (member (alist-get 'kind (android-project--cli-failure (or output "")))
+                              '("stale-model" "stale-baseline")))
 		  (progn
                     (remhash root android-project--project-refresh-invalidated)
                     (android-project--restart-project-refresh
                      root (gethash root android-project--project-refresh-callbacks)))
 		(if (and (= (process-exit-status process) 0) output)
                     (let ((data (condition-case err
-                                    (android-project--parse-cli-model output root)
+                                    (if-let* ((context (process-get process 'android-project-context)))
+                                        (progn
+                                          (unless (and (eq (process-get process 'android-project-base-data)
+                                                           android-project--flavor-cache)
+                                                       (eq context (gethash root android-project--dependency-contexts)))
+                                            (error "Metadata generation changed"))
+                                          (android-project--merge-dependency-output
+                                           output root context android-project--flavor-cache
+                                           (process-get process 'android-project-requests)))
+                                      (android-project--parse-cli-model output root))
 				  (error
 				   (android-project--log "model response rejected: %s" (error-message-string err))
 				   nil))))
                       (cond
                        ((or (android-project--project-refresh-stale-p root start-fingerprint inputs)
-                            (not (equal (process-get process 'android-project-selection-signature)
-                                        (android-project--selection-signature root))))
+                            (not (android-project--requests-compatible-p process root))
+                            (not (android-project--metadata-generation-current-p process root)))
 			(remhash root android-project--project-refresh-invalidated)
 			(android-project--restart-project-refresh
 			 root (gethash root android-project--project-refresh-callbacks)))
                        (data
-			(android-project--log "refreshed %d flavor entries" (length data))
-			(android-project--finish-project-refresh root data nil))
+                        (unless (process-get process 'android-project-context)
+                          (let* ((json-object-type 'hash-table) (json-array-type 'vector) (json-key-type 'string)
+                                 (json-false :json-false) (json-null :json-null)
+                                 (raw (gethash "dependencyContext" (json-read-from-string output)))
+                                 (context (and (hash-table-p raw)
+                                               (list (cons 'id (gethash "id" raw))
+                                                     (cons 'payload (gethash "payload" raw))))))
+                            (if context (puthash root context android-project--dependency-contexts)
+                              (remhash root android-project--dependency-contexts))))
+                        (android-project--log "refreshed %d entries: mode=%s requests=%d elapsed=%.2fs"
+                                              (length data)
+                                              (if (process-get process 'android-project-context) "dependencies" "metadata")
+                                              (length (process-get process 'android-project-requests))
+                                              (- (float-time) (process-get process 'android-project-started-at)))
+                        (android-project--finish-project-refresh root data nil)
+                        (unless (equal (process-get process 'android-project-demand)
+                                       (gethash root android-project--dependency-requests))
+                          (android-project--schedule-dependencies root)))
                        (t
 			(android-project--finish-project-refresh
 			 root nil "Gradle returned no Android project model"))))
@@ -693,17 +792,20 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
         (when-let* ((timer (process-get process 'android-project-completion-timer)))
           (cancel-timer timer)
           (process-put process 'android-project-completion-timer nil))
-        (when-let* ((file (process-get process 'android-project-selection-file)))
-          (when (file-exists-p file) (delete-file file)))
+        (dolist (property '(android-project-selection-file android-project-metadata-file))
+          (when-let* ((file (process-get process property)))
+            (when (file-exists-p file) (delete-file file))))
         (when (buffer-live-p diagnostics) (kill-buffer diagnostics))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
-(defun android-project--start-cli-process (root command)
-  "Start ROOT model COMMAND, cleaning temporary buffers on launch failure."
+(defun android-project--start-cli-process (root command &optional context)
+  "Start ROOT model COMMAND with optional CONTEXT and clean launch failures."
   (let ((buffer (generate-new-buffer " *android-project-model*"))
         (diagnostics (generate-new-buffer " *android-project-model-log*"))
-        selection-file)
+        (requests (if context (android-project--pending-dependencies root)
+                    (gethash root android-project--dependency-requests)))
+        selection-file metadata-file)
     (condition-case err
         (progn
           (when (equal (cadr command) "sync")
@@ -718,9 +820,17 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
                                  (when (consp (car selection))
                                    `((buildRoot . ,(caar selection)) (modulePath . ,(cdar selection))
                                      (variant . ,(cdr selection)))))
-                               (gethash root android-project--dependency-requests)))))))
-            (setq command (append command (list "--selection-file" selection-file
-                                               "--dependencies" "requested"))))
+                               requests))))))
+            (if context
+                (progn
+                  (setq metadata-file (make-temp-file "android-project-metadata-" nil ".json"))
+                  (with-temp-file metadata-file
+                    (let ((json-null :json-null) (json-false :json-false))
+                      (insert (json-encode context))))
+                  (setq command (append (list (car command) "dependencies") (cddr command)
+                                        (list "--selection-file" selection-file "--metadata-file" metadata-file))))
+              (setq command (append command (list "--selection-file" selection-file
+                                                 "--dependencies" "requested")))))
           (let ((process (make-process
                         :name (format "android-project-model-%s"
                                       (file-name-nondirectory (directory-file-name root)))
@@ -732,17 +842,21 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
                                       (process-put process 'android-project-pending-event event))))))
           (process-put process 'android-project-diagnostics diagnostics)
           (process-put process 'android-project-selection-file selection-file)
+          (process-put process 'android-project-metadata-file metadata-file)
+          (process-put process 'android-project-requests (copy-tree requests))
           process))
       (error
        (when (and selection-file (file-exists-p selection-file)) (delete-file selection-file))
+       (when (and metadata-file (file-exists-p metadata-file)) (delete-file metadata-file))
        (kill-buffer buffer)
        (kill-buffer diagnostics)
        (signal (car err) (cdr err))))))
 
-(defun android-refresh-project-model (&optional project-root callback)
+(defun android-refresh-project-model (&optional project-root callback dependencies-only)
   "Refresh PROJECT-ROOT asynchronously and return its process.
 CALLBACK, when non-nil, is called with two arguments DATA and ERROR.  Multiple
-requests for the same root share one Gradle process."
+requests for the same root share one Gradle process.  DEPENDENCIES-ONLY is
+internal: reuse an accepted metadata context when inputs are current."
   (when-let* ((root (android-project--project-root project-root)))
     (when callback
       (puthash root
@@ -756,13 +870,23 @@ requests for the same root share one Gradle process."
                                       android-project--flavor-cache)))
 		   (fingerprint (android-project--project-model-fingerprint root nil inputs))
 		   (command (android-project--gradle-model-command root))
+                   (context (and dependencies-only
+                                 (android-project--flavor-cache-current-p root)
+                                 (gethash root android-project--dependency-contexts)))
                    (default-directory root)
-                   (process (android-project--start-cli-process root command))
+                   (process (if context (android-project--start-cli-process root command context)
+                              (android-project--start-cli-process root command)))
                    (buffer (process-buffer process)))
               (with-current-buffer buffer
 		(setq-local default-directory root))
               (process-put process 'android-project-root root)
-              (process-put process 'android-project-selection-signature (android-project--selection-signature root))
+              (process-put process 'android-project-started-at (float-time))
+              (process-put process 'android-project-context context)
+              (process-put process 'android-project-base-data android-project--flavor-cache)
+              (process-put process 'android-project-demand
+                           (copy-tree (gethash root android-project--dependency-requests)))
+              (process-put process 'android-project-variants
+                           (copy-tree (cdr (assoc root android-project--selected-variants))))
               (process-put process 'android-project-inputs inputs)
               (process-put process 'android-project-input-fingerprint fingerprint)
               (remhash root android-project--project-refresh-invalidated)
@@ -1038,8 +1162,7 @@ This query never waits."
           (puthash root (cons request
                               (seq-remove (lambda (old) (equal (car old) (car request))) requests))
                    android-project--dependency-requests))
-        (unless (gethash root android-project--project-refresh-processes)
-          (android-refresh-project-model root)))
+        (android-project--schedule-dependencies root))
       snapshot)))
 
 (defun android-project-target (module &optional variant project-root refresh)
@@ -1165,7 +1288,9 @@ REFRESH non-nil, refresh Gradle metadata."
     (puthash root (cons (cons module-id variant)
                         (seq-remove (lambda (request) (equal (car request) module-id)) requests))
              android-project--dependency-requests))
-  (android-project--mark-project-model-stale root))
+  ;; Selection changes notify consumers without invalidating reusable metadata.
+  (run-hook-with-args 'android-project-model-updated-hook root android-project--flavor-cache)
+  (android-project--schedule-dependencies root))
 
 (defun android-project--select-target (&optional prompt)
   "Return selected (MODULE . VARIANT) for the current project.

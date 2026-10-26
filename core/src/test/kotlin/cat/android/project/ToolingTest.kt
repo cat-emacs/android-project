@@ -105,6 +105,7 @@ class ToolingTest {
             class BuildTypeData { boolean isDefault = false }
             class FakeAndroidPlugin implements Plugin<Project> {
                 void apply(Project p) {
+                    if (p.file('build/mutate-input').exists()) p.file('changed.properties').text = 'during-dependencies'
                     def variant = new VariantData(
                         applicationId: p.providers.provider {
                             def counter = p.file('build/supplement-configurations')
@@ -134,6 +135,20 @@ class ToolingTest {
         assertEquals(listOf("src/with|pipes;and中文"),target.components.single().sourceRoots)
         assertFalse(target.preferredBuildType)
         assertEquals(listOf("VariantKgpSupplement"),structure.modules.single().fetchedModels)
+        val baseline=readMetadataBaseline(root,metadataContext(root,structure))
+        val snapshots=GradleTooling(home).use { it.dependencies(root,baseline,
+            listOf(TargetSelection(root.toRealPath().toString(),":","debug")),120) }
+        assertEquals("unsupported",snapshots.single().status)
+        assertEquals("1",root.resolve("build/supplement-configurations").readText())
+        root.resolve("build/mutate-input").writeText("true")
+        assertEquals("stale-model",assertFailsWith<ProjectFailure> {
+            GradleTooling(home).use { it.dependencies(root,baseline,
+                listOf(TargetSelection(root.toRealPath().toString(),":","debug")),120) }
+        }.kind)
+        root.resolve("input.properties").writeText("changed=true")
+        assertEquals("stale-baseline",assertFailsWith<ProjectFailure> {
+            GradleTooling(home).use { it.dependencies(root,baseline,emptyList(),120) }
+        }.kind)
     }
     @Test fun `lightweight discovery still rejects included build inputs changed during model fetch`() {
         root.resolve("settings.gradle").writeText("rootProject.name='entry'\nincludeBuild('included')\n")
