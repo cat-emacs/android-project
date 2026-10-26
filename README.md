@@ -104,7 +104,12 @@ changing during sync cause stale results to be discarded and retried.
 
 Refresh callbacks receive `(DATA ERROR)`. State/success notifications use
 `android-project-model-state-changed-hook` and
-`android-project-model-updated-hook`. Module/variant selection and model caches
+`android-project-model-updated-hook`. Scoped consumers can instead use
+`android-project-model-changed-hook`, receiving ROOT and a plist with `:kind`
+(`metadata`, `dependencies`, `selection`) and exact `:targets` triples for scoped
+changes. Unchanged dependency snapshots emit no scoped change. The existing
+updated hook retains its two-argument contract for general consumers.
+Module/variant selection and model caches
 are stored under `android-project-cache-directory`. Cache schema 14 invalidates
 older state. Targets are plists only; the old `android-mode-cache-dir` alias,
 private tuple helpers and `previewTask` hint have been removed.

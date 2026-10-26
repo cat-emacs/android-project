@@ -80,6 +80,12 @@ The form is not executed when no project root directory can be found."
 (defvar android-project-model-updated-hook nil
   "Hook run after an Android project model refresh succeeds.")
 
+(defvar android-project-model-changed-hook nil
+  "Hook receiving ROOT and a scoped change plist.
+:kind is metadata, dependencies or selection.  :targets lists exact changed
+identities as build-root/module-path/variant triples for scoped changes.
+Unchanged dependency snapshots do not emit this hook.")
+
 (defvar android-project-model-state-changed-hook nil
   "Hook run after an Android project model state changes.
 Each function receives PROJECT-ROOT and the new status plist.")
@@ -598,9 +604,10 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
                :preferred-product-flavors (append (alist-get 'preferredProductFlavors entry) nil))))
      (append targets nil))))
 
-(defun android-project--finish-project-refresh (root data error-data)
-  "Finish the project model refresh for ROOT with DATA or ERROR-DATA."
-  (let ((callbacks (prog1 (gethash root android-project--project-refresh-callbacks)
+(defun android-project--finish-project-refresh (root data error-data &optional dependencies-only)
+  "Finish ROOT with DATA or ERROR-DATA, optionally DEPENDENCIES-ONLY."
+  (let ((previous (and (equal root android-project--flavor-cache-root) android-project--flavor-cache))
+        (callbacks (prog1 (gethash root android-project--project-refresh-callbacks)
                      (remhash root android-project--project-refresh-callbacks))))
     (remhash root android-project--project-refresh-processes)
     (if data
@@ -609,6 +616,20 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
                 android-project--flavor-cache-root root)
           (android-project--flavor-cache-save root data)
           (android-project--set-project-model-state root 'ready)
+          (let ((changed (and dependencies-only
+                              (seq-filter
+                               (lambda (entry)
+                                 (let ((old (seq-find
+                                             (lambda (candidate)
+                                               (and (equal (plist-get entry :module-id) (plist-get candidate :module-id))
+                                                    (equal (plist-get entry :variant) (plist-get candidate :variant)))) previous)))
+                                   (not (equal (plist-get entry :dependencies) (plist-get old :dependencies))))) data))))
+            (when (or (not dependencies-only) changed)
+              (run-hook-with-args 'android-project-model-changed-hook root
+                                  (list :kind (if dependencies-only 'dependencies 'metadata)
+                                        :targets (mapcar (lambda (entry)
+                                                           (list (plist-get entry :build-root) (plist-get entry :module-path)
+                                                                 (plist-get entry :variant))) changed)))))
           (run-hook-with-args 'android-project-model-updated-hook root data))
       (android-project--set-project-model-state root 'failed error-data))
     (dolist (callback callbacks)
@@ -721,7 +742,13 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
 
 (defun android-project--project-refresh-sentinel (process event)
   "Handle project model refresh PROCESS completion described by EVENT."
-  (when (memq (process-status process) '(exit signal))
+  (when (and (memq (process-status process) '(exit signal))
+             (not (process-get process 'android-project-consuming)))
+    (process-put process 'android-project-consuming t)
+    ;; Terminal status can precede delivery of the last pipe bytes.
+    ;; Output draining may dispatch this sentinel again; claim completion first.
+    (let ((deadline (+ (float-time) .2)))
+      (while (and (< (float-time) deadline) (accept-process-output process .01))))
     (let* ((root (process-get process 'android-project-root))
            (buffer (process-buffer process))
            (current (gethash root android-project--project-refresh-processes))
@@ -779,7 +806,8 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
                                               (if (process-get process 'android-project-context) "dependencies" "metadata")
                                               (length (process-get process 'android-project-requests))
                                               (- (float-time) (process-get process 'android-project-started-at)))
-                        (android-project--finish-project-refresh root data nil)
+                        (android-project--finish-project-refresh
+                         root data nil (process-get process 'android-project-context))
                         (unless (equal (process-get process 'android-project-demand)
                                        (gethash root android-project--dependency-requests))
                           (android-project--schedule-dependencies root)))
@@ -1289,6 +1317,8 @@ REFRESH non-nil, refresh Gradle metadata."
                         (seq-remove (lambda (request) (equal (car request) module-id)) requests))
              android-project--dependency-requests))
   ;; Selection changes notify consumers without invalidating reusable metadata.
+  (run-hook-with-args 'android-project-model-changed-hook root
+                      (list :kind 'selection :targets (list (list (car module-id) (cdr module-id) variant))))
   (run-hook-with-args 'android-project-model-updated-hook root android-project--flavor-cache)
   (android-project--schedule-dependencies root))
 
