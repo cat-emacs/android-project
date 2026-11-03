@@ -62,6 +62,24 @@ Install the CLI separately, then configure the frontend:
 Emacs never builds or installs the CLI automatically. Loading the library does
 not enable a minor mode or add find-file/dired hooks.
 
+## Agent skill
+
+The model-invoked [android-project skill](skills/android-project/SKILL.md) teaches agents
+to use the installed CLI with exact target identity, JVM diagnostics and result
+validation. Keep the whole skill directory, including any references. From this
+repository checkout, choose your agent's skill root and copy into a new directory:
+
+```sh
+SKILL_ROOT=/path/to/your/agent/skills
+mkdir -p "$SKILL_ROOT"
+# Stop if installed; review/update the existing skill separately.
+test ! -e "$SKILL_ROOT/android-project" && cp -R skills/android-project "$SKILL_ROOT/"
+```
+
+Reload skill discovery, then ask the agent to use `android-project` for the task.
+This installs instructions only; install the CLI separately. A skill installed
+from this branch expects the CLI 0.1.5 interface.
+
 ## CLI
 
 ```sh
