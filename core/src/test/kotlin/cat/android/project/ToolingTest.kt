@@ -17,6 +17,66 @@ class ToolingTest {
         ProjectModule::class.java.getResourceAsStream("/cat/android/project/android-project-tooling.jar")!!.use { Files.copy(it,plugin) }
         return script to plugin
     }
+    @Test fun `build Java home from invocation environment overrides process default`() {
+        root.resolve("settings.gradle").writeText("rootProject.name='java-home'\n")
+        root.resolve("build.gradle").writeText("tasks.register('probe')\n")
+        val home=Path.of(System.getProperty("project.test.gradle.home"))
+        val error=assertFailsWith<ProjectFailure> {
+            GradleTooling(home).use { it.build(root,"probe",emptyList(),
+                mapOf("JAVA_HOME" to root.resolve("missing-jdk").toString()),30) }
+        }
+        assertTrue(error.message!!.contains("missing-jdk"),error.message)
+    }
+    @Test fun `JVM policy respects criteria properties and scoped IDE macros without fallback guesses`() {
+        val user=root.resolve("user").createDirectories()
+        val env=mapOf("GRADLE_USER_HOME" to user.toString(),"JAVA_HOME" to System.getProperty("java.home"))
+        val jdk=System.getProperty("java.home")
+        assertEquals("JAVA_HOME",selectGradleJvm(root,env=env).source)
+        val idea=root.resolve(".idea").createDirectories().resolve("gradle.xml")
+        idea.writeText("""<project><GradleProjectSettings><option name="externalProjectPath" value="${'$'}PROJECT_DIR${'$'}"/><option name="gradleJvm" value="#GRADLE_LOCAL_JAVA_HOME"/></GradleProjectSettings></project>""")
+        assertFailsWith<ProjectFailure> { selectGradleJvm(root,env=env) }
+        val local=root.resolve(".gradle").createDirectories().resolve("config.properties")
+        java.util.Properties().apply { setProperty("java.home",jdk) }.also { p -> local.outputStream().use { p.store(it,null) } }
+        assertEquals("GRADLE_LOCAL_JAVA_HOME",selectGradleJvm(root,env=env).source)
+        val signature=gradleJvmSignature(root,env=env)
+        local.appendText("\n#changed\n")
+        assertNotEquals(signature,gradleJvmSignature(root,env=env))
+        val project=root.resolve("gradle.properties")
+        java.util.Properties().apply { setProperty("org.gradle.java.home",jdk) }.also { p -> project.outputStream().use { p.store(it,null) } }
+        assertEquals("project-gradle.properties",selectGradleJvm(root,env=env).source)
+        project.copyTo(user.resolve("gradle.properties"))
+        assertEquals("user-gradle.properties",selectGradleJvm(root,env=env).source)
+        assertEquals("explicit",selectGradleJvm(root,Path.of(jdk),env).source)
+        root.resolve("gradle").createDirectories().resolve("gradle-daemon-jvm.properties").writeText("toolchainVersion=17")
+        assertEquals("daemon-jvm-criteria",selectGradleJvm(root,Path.of(jdk),env).source)
+        assertNull(selectGradleJvm(root,Path.of(jdk),env).javaHome)
+        root.resolve("gradle/wrapper").createDirectories().resolve("gradle-wrapper.properties")
+            .writeText("distributionUrl=https://services.gradle.org/distributions/gradle-8.7-bin.zip")
+        assertEquals("explicit",selectGradleJvm(root,Path.of(jdk),env).source)
+        root.resolve("gradle/gradle-daemon-jvm.properties").deleteExisting()
+        project.deleteExisting(); user.resolve("gradle.properties").deleteExisting()
+        idea.writeText(idea.readText().replace("#GRADLE_LOCAL_JAVA_HOME","unknown-ide-sdk"))
+        assertEquals("unsupported",assertFailsWith<ProjectFailure> { selectGradleJvm(root,env=env) }.kind)
+        assertEquals("explicit",selectGradleJvm(root,Path.of(jdk),env).source)
+    }
+    @Test fun `Gradle property and IDE local policy reach the actual build JVM`() {
+        root.resolve("settings.gradle").writeText("rootProject.name='jvm-policy'\n")
+        root.resolve("build.gradle").writeText("tasks.register('probe') { doLast { file('actual').text = System.getProperty('java.home') } }\n")
+        val current=Path.of(System.getProperty("java.home")).toRealPath()
+        val property=root.resolve("gradle.properties")
+        java.util.Properties().apply { setProperty("org.gradle.java.home",current.toString()) }
+            .also { p -> property.outputStream().use { p.store(it,null) } }
+        val installation=Path.of(System.getProperty("project.test.gradle.home"))
+        GradleTooling(installation).use { it.build(root,"probe",emptyList(),emptyMap(),120) }
+        assertEquals(current,Path.of(root.resolve("actual").readText()).toRealPath())
+        property.deleteExisting()
+        root.resolve(".idea").createDirectories().resolve("gradle.xml").writeText("""<project><GradleProjectSettings><option name="externalProjectPath" value="${'$'}PROJECT_DIR${'$'}"/><option name="gradleJvm" value="#GRADLE_LOCAL_JAVA_HOME"/></GradleProjectSettings></project>""")
+        root.resolve(".gradle").createDirectories().resolve("config.properties").outputStream().use {
+            java.util.Properties().apply { setProperty("java.home",current.toString()) }.store(it,null)
+        }
+        GradleTooling(installation).use { it.build(root,"probe",emptyList(),emptyMap(),120) }
+        assertEquals(current,Path.of(root.resolve("actual").readText()).toRealPath())
+    }
     @Test fun `typed DTOs serialize delimiters and unicode without a text protocol`() {
         val target=cat.android.project.tooling.TargetModel.TargetData(":app", "/path|with;delimiters", "/root", "debug",
             "com.example",listOf("src/中文|a;b"),"debug",listOf("a,b"),true,emptyList(),"com.android.application",
@@ -61,7 +121,7 @@ class ToolingTest {
             catch (_:UnsupportedOperationException) { attributes.creationTime().toString() }
             catch (_:IllegalArgumentException) { attributes.creationTime().toString() }
         val legacy=listOf(settings.toAbsolutePath().normalize(),attributes.size(),attributes.lastModifiedTime(),changed,null).joinToString("\u0000")
-        assertEquals(cat.android.project.io.sha256(legacy.toByteArray()),before)
+        assertEquals(cat.android.project.io.sha256((legacy + "\n" + gradleJvmSignature(root)).toByteArray()),before)
         Files.createDirectories(root.resolve("build"))
         root.resolve("build/Generated.kt").writeText("generated")
         root.resolve("README.md").writeText("documentation")

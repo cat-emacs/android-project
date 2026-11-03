@@ -27,7 +27,8 @@ data class ProjectModule(
 data class ProjectStructure(val modules: List<ProjectModule>, val buildRoots: List<String>,
     val targets: List<TargetModel.TargetData>, val dependencies: List<DependencySnapshot> = emptyList(),
     val buildPaths: Map<String,String> = emptyMap(), val selectionIssues: List<String> = emptyList(),
-    val dimensions: List<ModuleDimensions> = emptyList(), val inputSignatures: Map<String,String> = emptyMap()) : Serializable
+    val dimensions: List<ModuleDimensions> = emptyList(), val inputSignatures: Map<String,String> = emptyMap(),
+    val gradleJvm: Map<String,String> = emptyMap()) : Serializable
 
 /** Discovery must not fetch Android or supplement models that the next action will read. */
 internal class BuildRootsAction : BuildAction<List<String>>, Serializable {
@@ -112,7 +113,8 @@ internal class ProjectStructureAction(private val selections: List<TargetSelecti
             it.buildRoot == selection.buildRoot && it.modulePath == selection.modulePath && it.variant == selection.variant
         } }.map { "Stale dependency selection ignored: $it" }
         return ProjectStructure(modules, roots.toList(), targets, dependencies, buildPaths, selectionIssues,
-            dimensions.map { (id,names) -> ModuleDimensions(id.first,id.second,names) })
+            dimensions.map { (id,names) -> ModuleDimensions(id.first,id.second,names) },
+            gradleJvm = mapOf("javaHome" to System.getProperty("java.home"),"javaVersion" to System.getProperty("java.version")))
     }
 }
 
@@ -138,13 +140,20 @@ class GradleTooling(private val testInstallation: Path? = null) : AutoCloseable 
         return connector.connect().also { connection = it }
     }
     private fun configure(operation: LongRunningOperation, args: List<String>, env: Map<String,String>, output: OutputStream) {
-        operation.withArguments(args).setEnvironmentVariables(System.getenv() + env)
+        val requested = args.lastOrNull { it.startsWith("-Dorg.gradle.java.home=") }?.substringAfter('=') ?: env["JAVA_HOME"]
+        val directoryIndex = args.indexOfLast { it == "--project-dir" || it == "-p" }
+        val policyRoot = if (directoryIndex >= 0) Path.of(args.getOrNull(directoryIndex + 1)
+            ?: throw ProjectFailure("Missing --project-dir", "input")) else connectedRoot!!
+        val selection = selectGradleJvm(policyRoot,requested?.let { Path.of(it) })
+        System.err.println("gradle-jvm: requested-source=${selection.source} requested-home=${selection.javaHome ?: "gradle-managed"}")
+        operation.withArguments(args + selection.arguments()).setEnvironmentVariables(System.getenv() + env)
             .setStandardOutput(output).setStandardError(System.err).setColorOutput(false)
             .withCancellationToken(cancellation.token())
             .addProgressListener(org.gradle.tooling.ProgressListener { event ->
                 System.err.println("tooling: ${event.description}")
             })
-        System.getenv("JAVA_HOME")?.let { home -> operation.setJavaHome(Path.of(home).toFile()) }
+        if (selection.source !in setOf("user-gradle.properties","project-gradle.properties"))
+            selection.javaHome?.let { home -> operation.setJavaHome(Path.of(home).toFile()) }
     }
     private fun <T> await(timeout: Long, start: (ResultHandler<T>) -> Unit): T {
         val done = CountDownLatch(1)
@@ -229,6 +238,7 @@ internal fun synchronizeProject(project: Path, script: Path, plugin: Path, timeo
     if (!Files.isRegularFile(root.resolve("gradle/wrapper/gradle-wrapper.properties")))
         throw ProjectFailure("Project has no Gradle wrapper distribution", "input")
     val before = projectInputSignature(root)
+    val jvmBefore = gradleJvmSignature(root)
     val structure = GradleTooling().use { it.project(root, script, plugin, timeout, selections, dependencyMode) }
     val targets = structure.targets.distinctBy { listOf(it.buildRoot, it.modulePath, it.variant) }
     val moduleIds = structure.modules.map { it.buildRoot to it.path }.toSet()
@@ -246,8 +256,9 @@ internal fun synchronizeProject(project: Path, script: Path, plugin: Path, timeo
         }
     }
     val after = projectInputSignature(root)
-    if (before != after) throw ProjectFailure("Project inputs changed during model sync; retry", "stale-model")
+    if (before != after || jvmBefore != gradleJvmSignature(root)) throw ProjectFailure("Project inputs changed during model sync; retry", "stale-model")
     return obj("schemaVersion" to 1, "kind" to "android-project", "status" to "ready",
+        "gradleJvm" to structure.gradleJvm, "gradleJvmSelection" to selectGradleJvm(root),
         "projectRoot" to root.toString(), "transport" to "gradle-tooling-api", "modules" to structure.modules,
         "buildRoots" to structure.buildRoots, "targets" to jsonTargets, "selectionIssues" to structure.selectionIssues,
         "dependencyContext" to metadataContext(root,structure),

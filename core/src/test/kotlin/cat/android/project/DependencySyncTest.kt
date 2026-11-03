@@ -36,6 +36,10 @@ class DependencySyncTest {
         assertEquals(original.dimensions,decoded.structure.dimensions)
         decoded.checkInputs()
         assertFailsWith<ProjectFailure> { readMetadataBaseline(root.resolve("other"),context) }
+        val local = root.resolve(".gradle").createDirectories().resolve("config.properties")
+        local.writeText("# local JVM configuration changed\n")
+        assertEquals("stale-baseline",assertFailsWith<ProjectFailure> { readMetadataBaseline(root,context) }.kind)
+        local.deleteExisting()
         context.getAsJsonObject("payload").addProperty("projectRoot","/other")
         assertFailsWith<ProjectFailure> { readMetadataBaseline(root,context) }
     }

@@ -33,7 +33,7 @@ internal fun metadataContext(root: Path, structure: ProjectStructure): JsonObjec
         targets = structure.targets.map { target -> TargetModel.TargetData(target.modulePath,target.moduleRoot,
             target.buildRoot,target.variant,"",emptyList(),target.buildType,target.productFlavors,false,emptyList(),
             "","","",emptyList(),"",false) })
-    val payload = obj("version" to 1, "consumer" to "core-0.1.6-agp-9.3.0",
+    val payload = obj("version" to 1, "consumer" to "core-0.1.7-agp-9.3.0", "jvmPolicy" to gradleJvmSignature(root),
         "javaHome" to System.getProperty("java.home"), "gradleUserHome" to System.getenv("GRADLE_USER_HOME"),
         "projectRoot" to root.toString(), "structure" to metadata)
     return obj("id" to jsonHash(payload), "payload" to payload)
@@ -41,7 +41,8 @@ internal fun metadataContext(root: Path, structure: ProjectStructure): JsonObjec
 internal fun readMetadataBaseline(root: Path, context: JsonObject): MetadataBaseline {
     try {
         val payload = context.getAsJsonObject("payload")
-        if (payload["version"].asInt != 1 || payload["consumer"].asString != "core-0.1.6-agp-9.3.0" ||
+        if (payload["version"].asInt != 1 || payload["consumer"].asString != "core-0.1.7-agp-9.3.0" ||
+            payload["jvmPolicy"].asString != gradleJvmSignature(root) ||
             payload["javaHome"].asString != System.getProperty("java.home") ||
             payload["gradleUserHome"] != obj("value" to System.getenv("GRADLE_USER_HOME"))["value"] ||
             context["id"].asString != jsonHash(payload) ||

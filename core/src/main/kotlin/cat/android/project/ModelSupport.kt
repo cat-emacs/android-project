@@ -13,12 +13,14 @@ class ProjectFailure(message: String, val kind: String = "error") : RuntimeExcep
 fun projectInputSignature(root: Path): String {
     val skip = setOf(".git", ".gradle", ".idea", "build", "node_modules")
     val suffixes = setOf("kt", "kts", "java", "groovy", "gradle", "properties", "toml", "xml", "jar", "aar")
-    val records = walkFiles(root) { it.fileName.toString() in skip }.filter { it.extension in suffixes }.map { path ->
+    val inputs = walkFiles(root) { it.fileName.toString() in skip }.filter { it.extension in suffixes }
+    val records = inputs.map { path ->
         (listOf(path.toAbsolutePath().normalize().toString()) +
             (fileStamp(path) ?: throw NoSuchFileException(path.toString())) +
             listOf(symbolicLinkTarget(path))).joinToString("\u0000")
     }
-    return sha256(records.sorted().joinToString("\n").toByteArray(Charsets.UTF_8))
+    val identity = records.sorted().joinToString("\n") + "\n" + gradleJvmSignature(root)
+    return sha256(identity.toByteArray(Charsets.UTF_8))
 }
 
 /** Project sync keeps all script resources in the core artifact, never in a consumer. */

@@ -126,8 +126,18 @@ wire interfaces compiled into both sides. The plugin jar is bundled as a core
 resource, so no extra artifact installation is required. Preview embeds the library in its JVM, not the project CLI.
 The Emacs frontend remains in `android-project.el`.
 
-Published artifact: **`org.cat-emacs:android-project-core:0.1.6`**. The current
-source uses this version; an explicit local repository is optional for development.
+Published artifact: **`org.cat-emacs:android-project-core:0.1.6`**. Current source
+prepares **0.1.7** (unreleased), sharing Gradle JVM policy between consumers.
+Supported Daemon JVM criteria takes precedence, then explicit invocation home,
+user/project `org.gradle.java.home`, linked IDE Gradle JVM (`#JAVA_HOME` or
+`#GRADLE_LOCAL_JAVA_HOME`), then `JAVA_HOME`/client runtime. Unknown named IDE
+SDKs fail explicitly rather than guessing an installed JDK. Sync reports actual
+`gradleJvm` from the build action, separate from `gradleJvmSelection`. Policy
+inputs also guard dependency contexts and metadata signatures. No JDK downloads
+or configuration migration are implemented (Gradle may provision per existing
+project configuration). This lets Preview render on Java 21 without forcing 21
+on project builds; core still targets 17.
+Use an explicit local repository for unpublished development artifacts.
 Registry: `https://maven.pkg.github.com/cat-emacs/android-project`
 
 GitHub Maven Packages requires authentication even for public packages.
@@ -200,13 +210,13 @@ graphs and full configuration-aware variant propagation are deferred.
 
 ## Limits and development
 
-The staging follows the local Android Studio source design (idea revision
-`001c2a2cb31`): `ModelProviderCachedData` shares models within a sync and clears
+`ModelProviderCachedData` in Android Studio shares models within a sync and clears
 state afterward; phased providers reuse fetched data and control dependency
 classpath requests. This CLI borrows the bounded-lifetime principle, not the
 whole IDE phased-sync implementation. Avoiding duplicate model fetches is preferred
-to reusing stale Gradle proxies across invocations.
-
+to reusing stale Gradle proxies across invocations. See the
+[source alignment notes](docs/studio-alignment.md) for the current comparison,
+version-gated dependency models and intentionally retained direct-root semantics.
 
 Sync fetches AGP V2 `BasicAndroidProject`, `AndroidProject` and `AndroidDsl` where
 available. Namespace, final artifact IDs, build type/flavors, default preferences
