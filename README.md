@@ -126,8 +126,9 @@ wire interfaces compiled into both sides. The plugin jar is bundled as a core
 resource, so no extra artifact installation is required. Preview embeds the library in its JVM, not the project CLI.
 The Emacs frontend remains in `android-project.el`.
 
-Published artifact: **`org.cat-emacs:android-project-core:0.1.6`**. Current source
-prepares **0.1.7** (unreleased), sharing Gradle JVM policy between consumers.
+Published artifact: **`org.cat-emacs:android-project-core:0.1.7`**, verified by
+an authenticated download compared byte-for-byte with the tested build.
+The shared core supplies Gradle JVM policy to both consumers.
 Supported Daemon JVM criteria takes precedence, then explicit invocation home,
 user/project `org.gradle.java.home`, linked IDE Gradle JVM (`#JAVA_HOME` or
 `#GRADLE_LOCAL_JAVA_HOME`), then `JAVA_HOME`/client runtime. Unknown named IDE
@@ -137,7 +138,7 @@ inputs also guard dependency contexts and metadata signatures. No JDK downloads
 or configuration migration are implemented (Gradle may provision per existing
 project configuration). This lets Preview render on Java 21 without forcing 21
 on project builds; core still targets 17.
-Use an explicit local repository for unpublished development artifacts.
+An explicit local repository remains available for development artifacts.
 Registry: `https://maven.pkg.github.com/cat-emacs/android-project`
 
 GitHub Maven Packages requires authentication even for public packages.
